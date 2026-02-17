@@ -55,11 +55,28 @@ Deno.serve(async (req) => {
   try {
     // Route: POST /start
     if (path === "/start" && req.method === "POST") {
-      // Call external Playwright service
+      const body = await req.json().catch(() => ({}));
+      const loginSetup = body.login_setup === true;
+      const profilePath = `~/profiles/${userId}`;
+
+      // Check if user has an existing profile path stored
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("browser_profile_path")
+        .eq("id", userId)
+        .single();
+
+      const userDataDir = profile?.browser_profile_path || profilePath;
+
+      // Call external Playwright service with user-data-dir
       const extResp = await fetch(`${BROWSER_URL}/browser/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_id: userId }),
+        body: JSON.stringify({
+          user_id: userId,
+          user_data_dir: userDataDir,
+          login_setup: loginSetup,
+        }),
       });
       const extData = await extResp.json();
 
@@ -75,10 +92,12 @@ Deno.serve(async (req) => {
         .from("browser_sessions")
         .insert({
           user_id: userId,
-          status: "running",
+          status: loginSetup ? "login_setup" : "running",
           vnc_url: extData.vnc_url || null,
           playwright_url: extData.playwright_url || null,
           metadata: extData.metadata || {},
+          browser_profile_path: userDataDir,
+          last_worker_endpoint: extData.worker_endpoint || null,
         })
         .select()
         .single();
@@ -88,6 +107,14 @@ Deno.serve(async (req) => {
           status: 500,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
+      }
+
+      // Save profile path for future sessions
+      if (!profile?.browser_profile_path) {
+        await supabase
+          .from("profiles")
+          .update({ browser_profile_path: userDataDir })
+          .eq("id", userId);
       }
 
       return new Response(JSON.stringify(session), {
@@ -311,6 +338,28 @@ Deno.serve(async (req) => {
       }
 
       return new Response(JSON.stringify(task), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    // Route: POST /save-session — persist browser profile after manual login
+    if (path === "/save-session" && req.method === "POST") {
+      const { session_id } = await req.json();
+
+      // Tell browser service to flush profile data
+      await fetch(`${BROWSER_URL}/browser/save-session`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id }),
+      });
+
+      // Update session status
+      await supabase
+        .from("browser_sessions")
+        .update({ status: "running", metadata: { login_saved: true, saved_at: new Date().toISOString() } })
+        .eq("id", session_id);
+
+      return new Response(JSON.stringify({ saved: true }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }

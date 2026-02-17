@@ -234,8 +234,10 @@ export type Database = {
       }
       browser_sessions: {
         Row: {
+          browser_profile_path: string | null
           created_at: string
           id: string
+          last_worker_endpoint: string | null
           metadata: Json
           playwright_url: string | null
           status: string
@@ -245,8 +247,10 @@ export type Database = {
           vnc_url: string | null
         }
         Insert: {
+          browser_profile_path?: string | null
           created_at?: string
           id?: string
+          last_worker_endpoint?: string | null
           metadata?: Json
           playwright_url?: string | null
           status?: string
@@ -256,8 +260,10 @@ export type Database = {
           vnc_url?: string | null
         }
         Update: {
+          browser_profile_path?: string | null
           created_at?: string
           id?: string
+          last_worker_endpoint?: string | null
           metadata?: Json
           playwright_url?: string | null
           status?: string
@@ -394,6 +400,7 @@ export type Database = {
       profiles: {
         Row: {
           avatar_url: string | null
+          browser_profile_path: string | null
           created_at: string
           display_name: string | null
           id: string
@@ -401,6 +408,7 @@ export type Database = {
         }
         Insert: {
           avatar_url?: string | null
+          browser_profile_path?: string | null
           created_at?: string
           display_name?: string | null
           id: string
@@ -408,6 +416,7 @@ export type Database = {
         }
         Update: {
           avatar_url?: string | null
+          browser_profile_path?: string | null
           created_at?: string
           display_name?: string | null
           id?: string
