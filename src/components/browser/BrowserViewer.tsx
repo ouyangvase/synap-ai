@@ -1,4 +1,5 @@
-import { Monitor } from "lucide-react";
+import { Monitor, ExternalLink } from "lucide-react";
+import { Button } from "@/components/ui/button";
 
 interface BrowserViewerProps {
   session: { id: string; status: string; vnc_url: string | null } | null;
@@ -20,16 +21,27 @@ export function BrowserViewer({ session, screenshotUrl, takeOver }: BrowserViewe
     );
   }
 
-  // If takeOver mode and VNC URL is available, embed noVNC iframe
+  // If takeOver mode and live URL is available, show iframe + open-in-new-tab option
   if (takeOver && session.vnc_url) {
     return (
-      <div className="flex-1 relative">
-        <div className="absolute top-2 left-2 z-10 bg-destructive text-destructive-foreground text-xs px-2 py-1 rounded font-mono animate-pulse">
-          LIVE — You have control
+      <div className="flex-1 relative flex flex-col">
+        <div className="flex items-center justify-between px-3 py-1.5 bg-destructive/10 border-b border-destructive/20">
+          <span className="text-destructive text-xs font-mono font-medium animate-pulse">
+            LIVE — You have control
+          </span>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-6 gap-1 text-xs text-muted-foreground"
+            onClick={() => window.open(session.vnc_url!, "_blank")}
+          >
+            <ExternalLink className="w-3 h-3" />
+            Open in new tab
+          </Button>
         </div>
         <iframe
           src={session.vnc_url}
-          className="w-full h-full border-0"
+          className="flex-1 w-full border-0"
           title="Remote Browser"
           allow="clipboard-read; clipboard-write"
         />
@@ -42,7 +54,7 @@ export function BrowserViewer({ session, screenshotUrl, takeOver }: BrowserViewe
     <div className="flex-1 relative bg-muted/20 flex items-center justify-center overflow-hidden">
       {takeOver && !session.vnc_url && (
         <div className="absolute top-2 left-2 z-10 bg-accent text-accent-foreground text-xs px-2 py-1 rounded font-mono">
-          Take Over active — No VNC URL available. Configure your Playwright service to provide a VNC endpoint.
+          Take Over active — No live URL available
         </div>
       )}
       {screenshotUrl ? (
@@ -57,9 +69,17 @@ export function BrowserViewer({ session, screenshotUrl, takeOver }: BrowserViewe
           <p className="text-muted-foreground text-xs">
             Waiting for screenshot…
           </p>
-          <p className="text-muted-foreground/60 text-xs max-w-xs">
-            Ensure your Playwright service is running and accessible at the configured BROWSER_SERVICE_URL.
-          </p>
+          {session.vnc_url && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1"
+              onClick={() => window.open(session.vnc_url!, "_blank")}
+            >
+              <ExternalLink className="w-3 h-3" />
+              Open live browser
+            </Button>
+          )}
         </div>
       )}
     </div>

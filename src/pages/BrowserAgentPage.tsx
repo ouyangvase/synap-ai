@@ -153,6 +153,19 @@ export default function BrowserAgentPage() {
     setHasExistingProfile(true);
   };
 
+  const confirmLogin = async () => {
+    if (!session) return;
+    const headers = await getAuthHeaders();
+    const resp = await fetch(`${proxyUrl}/confirm-login`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ session_id: session.id }),
+    });
+    if (resp.ok) {
+      setSession((prev) => prev ? { ...prev, status: "running" } : prev);
+    }
+  };
+
   const stopSession = async () => {
     if (!session) return;
     const headers = await getAuthHeaders();
@@ -230,6 +243,7 @@ export default function BrowserAgentPage() {
           onTakeOver={() => setTakeOver(!takeOver)}
           onRefreshScreenshot={() => refreshScreenshot()}
           onSaveSession={saveSession}
+          onConfirmLogin={confirmLogin}
         />
 
         <div className="flex-1 overflow-y-auto">
