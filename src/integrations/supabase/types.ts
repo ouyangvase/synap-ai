@@ -86,6 +86,232 @@ export type Database = {
         }
         Relationships: []
       }
+      browser_actions: {
+        Row: {
+          action_type: string
+          completed_at: string | null
+          created_at: string
+          error: string | null
+          id: string
+          parameters: Json
+          result: Json | null
+          screenshot_url: string | null
+          session_id: string
+          status: string
+          task_id: string
+          user_id: string
+        }
+        Insert: {
+          action_type: string
+          completed_at?: string | null
+          created_at?: string
+          error?: string | null
+          id?: string
+          parameters?: Json
+          result?: Json | null
+          screenshot_url?: string | null
+          session_id: string
+          status?: string
+          task_id: string
+          user_id: string
+        }
+        Update: {
+          action_type?: string
+          completed_at?: string | null
+          created_at?: string
+          error?: string | null
+          id?: string
+          parameters?: Json
+          result?: Json | null
+          screenshot_url?: string | null
+          session_id?: string
+          status?: string
+          task_id?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "browser_actions_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "browser_sessions"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "browser_actions_task_id_fkey"
+            columns: ["task_id"]
+            isOneToOne: false
+            referencedRelation: "browser_tasks"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      browser_approvals: {
+        Row: {
+          action_id: string
+          created_at: string
+          id: string
+          reason: string | null
+          resolved_at: string | null
+          status: string
+          user_id: string
+        }
+        Insert: {
+          action_id: string
+          created_at?: string
+          id?: string
+          reason?: string | null
+          resolved_at?: string | null
+          status?: string
+          user_id: string
+        }
+        Update: {
+          action_id?: string
+          created_at?: string
+          id?: string
+          reason?: string | null
+          resolved_at?: string | null
+          status?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "browser_approvals_action_id_fkey"
+            columns: ["action_id"]
+            isOneToOne: true
+            referencedRelation: "browser_actions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      browser_artifacts: {
+        Row: {
+          artifact_type: string
+          created_at: string
+          file_url: string | null
+          id: string
+          metadata: Json
+          session_id: string
+          task_id: string | null
+          user_id: string
+        }
+        Insert: {
+          artifact_type: string
+          created_at?: string
+          file_url?: string | null
+          id?: string
+          metadata?: Json
+          session_id: string
+          task_id?: string | null
+          user_id: string
+        }
+        Update: {
+          artifact_type?: string
+          created_at?: string
+          file_url?: string | null
+          id?: string
+          metadata?: Json
+          session_id?: string
+          task_id?: string | null
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "browser_artifacts_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "browser_sessions"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "browser_artifacts_task_id_fkey"
+            columns: ["task_id"]
+            isOneToOne: false
+            referencedRelation: "browser_tasks"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      browser_sessions: {
+        Row: {
+          created_at: string
+          id: string
+          metadata: Json
+          playwright_url: string | null
+          status: string
+          stopped_at: string | null
+          updated_at: string
+          user_id: string
+          vnc_url: string | null
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          metadata?: Json
+          playwright_url?: string | null
+          status?: string
+          stopped_at?: string | null
+          updated_at?: string
+          user_id: string
+          vnc_url?: string | null
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          metadata?: Json
+          playwright_url?: string | null
+          status?: string
+          stopped_at?: string | null
+          updated_at?: string
+          user_id?: string
+          vnc_url?: string | null
+        }
+        Relationships: []
+      }
+      browser_tasks: {
+        Row: {
+          completed_at: string | null
+          created_at: string
+          description: string
+          id: string
+          result: Json | null
+          session_id: string
+          status: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          completed_at?: string | null
+          created_at?: string
+          description: string
+          id?: string
+          result?: Json | null
+          session_id: string
+          status?: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          completed_at?: string | null
+          created_at?: string
+          description?: string
+          id?: string
+          result?: Json | null
+          session_id?: string
+          status?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "browser_tasks_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "browser_sessions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       conversations: {
         Row: {
           agent_id: string | null
