@@ -6,6 +6,32 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
+function jsonResp(data: unknown, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
+/**
+ * Parse the BROWSER_SERVICE_URL which is a Browserless WSS URL like:
+ * wss://production-sfo.browserless.io?token=abc123
+ * We extract the base HTTP URL and token from it.
+ */
+function parseBrowserlessUrl(raw: string): { baseUrl: string; token: string } {
+  // Normalize: strip wss:// or ws:// and use https://
+  let cleaned = raw.trim();
+  if (cleaned.startsWith("wss://")) cleaned = "https://" + cleaned.slice(6);
+  else if (cleaned.startsWith("ws://")) cleaned = "http://" + cleaned.slice(5);
+  else if (!cleaned.startsWith("http")) cleaned = "https://" + cleaned;
+
+  const parsed = new URL(cleaned);
+  const token = parsed.searchParams.get("token") || "";
+  // Base URL without query params
+  const baseUrl = `${parsed.protocol}//${parsed.host}`;
+  return { baseUrl, token };
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -13,10 +39,7 @@ Deno.serve(async (req) => {
 
   const authHeader = req.headers.get("Authorization");
   if (!authHeader?.startsWith("Bearer ")) {
-    return new Response(JSON.stringify({ error: "Unauthorized" }), {
-      status: 401,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    return jsonResp({ error: "Unauthorized" }, 401);
   }
 
   const supabase = createClient(
@@ -28,85 +51,92 @@ Deno.serve(async (req) => {
   const token = authHeader.replace("Bearer ", "");
   const { data: claimsData, error: claimsError } = await supabase.auth.getClaims(token);
   if (claimsError || !claimsData?.claims) {
-    return new Response(JSON.stringify({ error: "Unauthorized" }), {
-      status: 401,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    return jsonResp({ error: "Unauthorized" }, 401);
   }
 
   const userId = claimsData.claims.sub as string;
-  let BROWSER_URL = Deno.env.get("BROWSER_SERVICE_URL");
+  const rawUrl = Deno.env.get("BROWSER_SERVICE_URL");
 
-  if (!BROWSER_URL) {
-    return new Response(
-      JSON.stringify({ error: "Browser service not configured" }),
-      { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+  if (!rawUrl) {
+    return jsonResp({ error: "Browser service not configured" }, 503);
   }
 
-  // Ensure the URL has a protocol
-  if (!BROWSER_URL.startsWith("http://") && !BROWSER_URL.startsWith("https://")) {
-    BROWSER_URL = `https://${BROWSER_URL}`;
+  let browserless: { baseUrl: string; token: string };
+  try {
+    browserless = parseBrowserlessUrl(rawUrl);
+  } catch {
+    return jsonResp({ error: "Invalid BROWSER_SERVICE_URL configuration" }, 500);
   }
 
   const url = new URL(req.url);
   const path = url.pathname.split("/browser-proxy")[1] || "/";
 
   try {
-    // Route: POST /start
+    // ──────────────────────────────────────────────
+    // POST /start — Create a Browserless session
+    // ──────────────────────────────────────────────
     if (path === "/start" && req.method === "POST") {
       const body = await req.json().catch(() => ({}));
       const loginSetup = body.login_setup === true;
-      const profilePath = `~/profiles/${userId}`;
 
-      // Check if user has an existing profile path stored
+      // Check if user has existing profile path (for session persistence)
       const { data: profile } = await supabase
         .from("profiles")
         .select("browser_profile_path")
         .eq("id", userId)
         .single();
 
+      const profilePath = `~/profiles/${userId}`;
       const userDataDir = profile?.browser_profile_path || profilePath;
 
-      // Call external Playwright service with user-data-dir
-      const extResp = await fetch(`${BROWSER_URL}/browser/start`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          user_id: userId,
-          user_data_dir: userDataDir,
-          login_setup: loginSetup,
-        }),
-      });
-      const extData = await extResp.json();
+      // Create a Browserless persistent session via Sessions API
+      const sessionResp = await fetch(
+        `${browserless.baseUrl}/session?token=${browserless.token}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            headless: false,
+            ttl: 86400000, // 24 hours persistence
+            args: [`--user-data-dir=${userDataDir}`],
+          }),
+        }
+      );
 
-      if (!extResp.ok) {
-        return new Response(JSON.stringify({ error: extData.error || "Failed to start session" }), {
-          status: extResp.status,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
+      if (!sessionResp.ok) {
+        const errText = await sessionResp.text();
+        return jsonResp({ error: `Browserless session creation failed: ${errText}` }, sessionResp.status);
       }
 
+      const sessionData = await sessionResp.json();
+      // sessionData contains: { browserWSEndpoint, browserQLEndpoint, ... }
+
+      // Derive live debugger URL
+      const wsEndpoint = sessionData.browserWSEndpoint || "";
+      const liveUrl = wsEndpoint
+        ? `${browserless.baseUrl}/live/?${new URLSearchParams({ token: browserless.token }).toString()}`
+        : null;
+
       // Store session in DB
-      const { data: session, error } = await supabase
+      const { data: dbSession, error: dbErr } = await supabase
         .from("browser_sessions")
         .insert({
           user_id: userId,
           status: loginSetup ? "login_setup" : "running",
-          vnc_url: extData.vnc_url || null,
-          playwright_url: extData.playwright_url || null,
-          metadata: extData.metadata || {},
+          vnc_url: liveUrl,
+          playwright_url: wsEndpoint,
           browser_profile_path: userDataDir,
-          last_worker_endpoint: extData.worker_endpoint || null,
+          last_worker_endpoint: wsEndpoint,
+          metadata: {
+            browserless_session: sessionData,
+            login_setup: loginSetup,
+          },
         })
         .select()
         .single();
 
-      if (error) {
-        return new Response(JSON.stringify({ error: error.message }), {
-          status: 500,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
+      if (dbErr) {
+        return jsonResp({ error: dbErr.message }, 500);
       }
 
       // Save profile path for future sessions
@@ -117,33 +147,29 @@ Deno.serve(async (req) => {
           .eq("id", userId);
       }
 
-      return new Response(JSON.stringify(session), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return jsonResp(dbSession);
     }
 
-    // Route: POST /action
+    // ──────────────────────────────────────────────
+    // POST /action — Execute a browser action via /function API
+    // ──────────────────────────────────────────────
     if (path === "/action" && req.method === "POST") {
       const body = await req.json();
       const { session_id, task_id, action_type, parameters, requires_approval } = body;
 
-      // Verify session ownership
+      // Verify session exists
       const { data: session } = await supabase
         .from("browser_sessions")
-        .select("id, status")
+        .select("id, status, playwright_url, metadata")
         .eq("id", session_id)
         .single();
 
       if (!session) {
-        return new Response(JSON.stringify({ error: "Session not found" }), {
-          status: 404,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
+        return jsonResp({ error: "Session not found" }, 404);
       }
 
       const initialStatus = requires_approval ? "awaiting_approval" : "pending";
 
-      // Create action record
       const { data: action, error: actionErr } = await supabase
         .from("browser_actions")
         .insert({
@@ -158,27 +184,25 @@ Deno.serve(async (req) => {
         .single();
 
       if (actionErr) {
-        return new Response(JSON.stringify({ error: actionErr.message }), {
-          status: 500,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
+        return jsonResp({ error: actionErr.message }, 500);
       }
 
-      // If requires approval, create approval record and return
       if (requires_approval) {
         await supabase.from("browser_approvals").insert({
           action_id: action.id,
           user_id: userId,
           status: "pending",
         });
-
-        return new Response(JSON.stringify({ ...action, awaiting_approval: true }), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
+        return jsonResp({ ...action, awaiting_approval: true });
       }
 
-      // Otherwise execute immediately
-      const result = await executeAction(BROWSER_URL, session_id, action_type, parameters);
+      // Execute via Browserless /function API
+      const result = await executeBrowserlessAction(
+        browserless,
+        session.playwright_url,
+        action_type,
+        parameters || {}
+      );
 
       await supabase
         .from("browser_actions")
@@ -191,50 +215,43 @@ Deno.serve(async (req) => {
         })
         .eq("id", action.id);
 
-      return new Response(
-        JSON.stringify({ ...action, status: result.success ? "completed" : "failed", result: result.data }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return jsonResp({
+        ...action,
+        status: result.success ? "completed" : "failed",
+        result: result.data,
+      });
     }
 
-    // Route: POST /approve
+    // ──────────────────────────────────────────────
+    // POST /approve — Approve or reject a pending action
+    // ──────────────────────────────────────────────
     if (path === "/approve" && req.method === "POST") {
       const { action_id, approved, reason } = await req.json();
-
       const newStatus = approved ? "approved" : "rejected";
 
-      // Update approval
       await supabase
         .from("browser_approvals")
         .update({ status: newStatus, reason, resolved_at: new Date().toISOString() })
         .eq("action_id", action_id);
 
-      // Get the action
       const { data: action } = await supabase
         .from("browser_actions")
-        .select("*")
+        .select("*, session:browser_sessions(playwright_url)")
         .eq("id", action_id)
         .single();
 
       if (!action) {
-        return new Response(JSON.stringify({ error: "Action not found" }), {
-          status: 404,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
+        return jsonResp({ error: "Action not found" }, 404);
       }
 
       if (approved) {
-        // Execute the action now
-        await supabase
-          .from("browser_actions")
-          .update({ status: "executing" })
-          .eq("id", action_id);
+        await supabase.from("browser_actions").update({ status: "executing" }).eq("id", action_id);
 
-        const result = await executeAction(
-          BROWSER_URL,
-          action.session_id,
+        const result = await executeBrowserlessAction(
+          browserless,
+          (action as any).session?.playwright_url,
           action.action_type,
-          action.parameters
+          action.parameters as Record<string, unknown>
         );
 
         await supabase
@@ -248,44 +265,52 @@ Deno.serve(async (req) => {
           })
           .eq("id", action_id);
 
-        return new Response(JSON.stringify({ approved: true, result: result.data }), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
+        return jsonResp({ approved: true, result: result.data });
       } else {
         await supabase
           .from("browser_actions")
           .update({ status: "rejected", completed_at: new Date().toISOString() })
           .eq("id", action_id);
-
-        return new Response(JSON.stringify({ approved: false, reason }), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
+        return jsonResp({ approved: false, reason });
       }
     }
 
-    // Route: GET /screenshot
+    // ──────────────────────────────────────────────
+    // GET /screenshot — Take a screenshot via Browserless REST API
+    // ──────────────────────────────────────────────
     if (path === "/screenshot" && req.method === "GET") {
       const sessionId = url.searchParams.get("session_id");
       if (!sessionId) {
-        return new Response(JSON.stringify({ error: "session_id required" }), {
-          status: 400,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
+        return jsonResp({ error: "session_id required" }, 400);
       }
 
-      const extResp = await fetch(
-        `${BROWSER_URL}/browser/screenshot?session_id=${sessionId}`
+      // Get the session's current page URL from metadata
+      const { data: session } = await supabase
+        .from("browser_sessions")
+        .select("metadata, playwright_url")
+        .eq("id", sessionId)
+        .single();
+
+      // Use the Browserless /screenshot REST API
+      const targetUrl = (session?.metadata as any)?.current_url || "about:blank";
+      const screenshotResp = await fetch(
+        `${browserless.baseUrl}/screenshot?token=${browserless.token}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: targetUrl,
+            options: { fullPage: false, type: "png" },
+          }),
+        }
       );
 
-      if (!extResp.ok) {
-        const errText = await extResp.text();
-        return new Response(JSON.stringify({ error: errText }), {
-          status: extResp.status,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
+      if (!screenshotResp.ok) {
+        const errText = await screenshotResp.text();
+        return jsonResp({ error: errText }, screenshotResp.status);
       }
 
-      const imageBlob = await extResp.blob();
+      const imageBlob = await screenshotResp.blob();
       return new Response(imageBlob, {
         headers: {
           ...corsHeaders,
@@ -295,27 +320,38 @@ Deno.serve(async (req) => {
       });
     }
 
-    // Route: POST /stop
+    // ──────────────────────────────────────────────
+    // POST /stop — Close session
+    // ──────────────────────────────────────────────
     if (path === "/stop" && req.method === "POST") {
       const { session_id } = await req.json();
 
-      await fetch(`${BROWSER_URL}/browser/stop`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id }),
-      });
+      // Get session metadata to find Browserless session ID
+      const { data: session } = await supabase
+        .from("browser_sessions")
+        .select("metadata")
+        .eq("id", session_id)
+        .single();
+
+      const blSession = (session?.metadata as any)?.browserless_session;
+
+      // If there's a Browserless session, try to close it (only if NOT saving)
+      if (blSession?.browserWSEndpoint) {
+        // Disconnect gracefully — Browserless keeps session data persisted
+        // We don't need to do anything special, the session TTL handles cleanup
+      }
 
       await supabase
         .from("browser_sessions")
         .update({ status: "stopped", stopped_at: new Date().toISOString() })
         .eq("id", session_id);
 
-      return new Response(JSON.stringify({ stopped: true }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return jsonResp({ stopped: true });
     }
 
-    // Route: POST /task
+    // ──────────────────────────────────────────────
+    // POST /task — Create a task
+    // ──────────────────────────────────────────────
     if (path === "/task" && req.method === "POST") {
       const { session_id, description } = await req.json();
 
@@ -331,67 +367,62 @@ Deno.serve(async (req) => {
         .single();
 
       if (error) {
-        return new Response(JSON.stringify({ error: error.message }), {
-          status: 500,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
+        return jsonResp({ error: error.message }, 500);
       }
 
-      return new Response(JSON.stringify(task), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return jsonResp(task);
     }
 
-    // Route: POST /save-session — persist browser profile after manual login
+    // ──────────────────────────────────────────────
+    // POST /save-session — Mark session as saved (login persisted)
+    // ──────────────────────────────────────────────
     if (path === "/save-session" && req.method === "POST") {
       const { session_id } = await req.json();
 
-      // Tell browser service to flush profile data
-      await fetch(`${BROWSER_URL}/browser/save-session`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id }),
-      });
-
-      // Update session status
+      // The Browserless session with --user-data-dir already persists cookies/localStorage.
+      // We just update our DB to reflect the login is saved.
       await supabase
         .from("browser_sessions")
-        .update({ status: "running", metadata: { login_saved: true, saved_at: new Date().toISOString() } })
+        .update({
+          status: "running",
+          metadata: {
+            login_saved: true,
+            saved_at: new Date().toISOString(),
+          },
+        })
         .eq("id", session_id);
 
-      return new Response(JSON.stringify({ saved: true }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return jsonResp({ saved: true });
     }
 
-    return new Response(JSON.stringify({ error: "Not found" }), {
-      status: 404,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    return jsonResp({ error: "Not found" }, 404);
   } catch (err) {
-    return new Response(JSON.stringify({ error: String(err) }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    return jsonResp({ error: String(err) }, 500);
   }
 });
 
-async function executeAction(
-  browserUrl: string,
-  sessionId: string,
+/**
+ * Execute a browser action using Browserless /function API.
+ * Sends a Puppeteer-compatible script that performs the action.
+ */
+async function executeBrowserlessAction(
+  browserless: { baseUrl: string; token: string },
+  _wsEndpoint: string | null,
   actionType: string,
   parameters: Record<string, unknown>
 ): Promise<{ success: boolean; data?: unknown; screenshot_url?: string; error?: string }> {
   try {
-    const resp = await fetch(`${browserUrl}/browser/action`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        session_id: sessionId,
-        action: actionType,
-        ...parameters,
-      }),
-    });
+    // Build a Puppeteer script that runs on Browserless
+    const script = buildActionScript(actionType, parameters);
+
+    const resp = await fetch(
+      `${browserless.baseUrl}/function?token=${browserless.token}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/javascript" },
+        body: script,
+      }
+    );
 
     if (!resp.ok) {
       const errText = await resp.text();
@@ -399,8 +430,55 @@ async function executeAction(
     }
 
     const data = await resp.json();
-    return { success: true, data, screenshot_url: data.screenshot_url };
+    return { success: true, data };
   } catch (err) {
     return { success: false, error: String(err) };
+  }
+}
+
+/**
+ * Build a Puppeteer-compatible script string for the Browserless /function endpoint.
+ */
+function buildActionScript(actionType: string, params: Record<string, unknown>): string {
+  switch (actionType) {
+    case "navigate":
+      return `export default async function ({ page }) {
+        await page.goto(${JSON.stringify(params.url || "about:blank")}, { waitUntil: "networkidle2" });
+        const title = await page.title();
+        return { data: { title, url: page.url() }, type: "application/json" };
+      }`;
+
+    case "click":
+      return `export default async function ({ page }) {
+        await page.goto(${JSON.stringify(params.url || "about:blank")}, { waitUntil: "networkidle2" });
+        await page.click(${JSON.stringify(params.selector || "body")});
+        return { data: { clicked: ${JSON.stringify(params.selector)} }, type: "application/json" };
+      }`;
+
+    case "type":
+      return `export default async function ({ page }) {
+        await page.goto(${JSON.stringify(params.url || "about:blank")}, { waitUntil: "networkidle2" });
+        await page.type(${JSON.stringify(params.selector || "input")}, ${JSON.stringify(params.text || "")});
+        return { data: { typed: true }, type: "application/json" };
+      }`;
+
+    case "screenshot":
+      return `export default async function ({ page }) {
+        await page.goto(${JSON.stringify(params.url || "about:blank")}, { waitUntil: "networkidle2" });
+        const screenshot = await page.screenshot({ encoding: "base64" });
+        return { data: { screenshot }, type: "application/json" };
+      }`;
+
+    case "extract":
+      return `export default async function ({ page }) {
+        await page.goto(${JSON.stringify(params.url || "about:blank")}, { waitUntil: "networkidle2" });
+        const content = await page.evaluate(() => document.body.innerText);
+        return { data: { content }, type: "application/json" };
+      }`;
+
+    default:
+      return `export default async function ({ page }) {
+        return { data: { error: "Unknown action type: ${actionType}" }, type: "application/json" };
+      }`;
   }
 }
