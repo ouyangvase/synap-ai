@@ -35,13 +35,18 @@ Deno.serve(async (req) => {
   }
 
   const userId = claimsData.claims.sub as string;
-  const BROWSER_URL = Deno.env.get("BROWSER_SERVICE_URL");
+  let BROWSER_URL = Deno.env.get("BROWSER_SERVICE_URL");
 
   if (!BROWSER_URL) {
     return new Response(
       JSON.stringify({ error: "Browser service not configured" }),
       { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
+  }
+
+  // Ensure the URL has a protocol
+  if (!BROWSER_URL.startsWith("http://") && !BROWSER_URL.startsWith("https://")) {
+    BROWSER_URL = `https://${BROWSER_URL}`;
   }
 
   const url = new URL(req.url);
