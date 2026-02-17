@@ -14,6 +14,7 @@ interface BrowserSession {
   id: string;
   status: string;
   vnc_url: string | null;
+  browser_profile_path: string | null;
   created_at: string;
 }
 
@@ -44,6 +45,7 @@ export default function BrowserAgentPage() {
   const [loading, setLoading] = useState(false);
   const [screenshotUrl, setScreenshotUrl] = useState<string | null>(null);
   const [takeOver, setTakeOver] = useState(false);
+  const [hasExistingProfile, setHasExistingProfile] = useState(false);
 
   const proxyUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/browser-proxy`;
 
@@ -56,7 +58,20 @@ export default function BrowserAgentPage() {
     };
   }, []);
 
-  // Subscribe to realtime updates
+  // Check for existing browser profile
+  useEffect(() => {
+    if (!user) return;
+    supabase
+      .from("profiles")
+      .select("browser_profile_path")
+      .eq("id", user.id)
+      .single()
+      .then(({ data }) => {
+        if (data?.browser_profile_path) setHasExistingProfile(true);
+      });
+  }, [user]);
+
+
   useEffect(() => {
     if (!session) return;
 
@@ -106,19 +121,36 @@ export default function BrowserAgentPage() {
     if (session) loadPendingApprovals();
   }, [session, loadPendingApprovals]);
 
-  const startSession = async () => {
+  const startSession = async (loginSetup = false) => {
     setLoading(true);
     try {
       const headers = await getAuthHeaders();
-      const resp = await fetch(`${proxyUrl}/start`, { method: "POST", headers });
+      const resp = await fetch(`${proxyUrl}/start`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ login_setup: loginSetup }),
+      });
       const data = await resp.json();
       if (resp.ok) {
         setSession(data);
+        if (loginSetup) setTakeOver(true);
         refreshScreenshot(data.id);
       }
     } finally {
       setLoading(false);
     }
+  };
+
+  const saveSession = async () => {
+    if (!session) return;
+    const headers = await getAuthHeaders();
+    await fetch(`${proxyUrl}/save-session`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ session_id: session.id }),
+    });
+    setSession((prev) => prev ? { ...prev, status: "running" } : prev);
+    setHasExistingProfile(true);
   };
 
   const stopSession = async () => {
@@ -192,10 +224,12 @@ export default function BrowserAgentPage() {
           session={session}
           loading={loading}
           takeOver={takeOver}
+          hasExistingProfile={hasExistingProfile}
           onStart={startSession}
           onStop={stopSession}
           onTakeOver={() => setTakeOver(!takeOver)}
           onRefreshScreenshot={() => refreshScreenshot()}
+          onSaveSession={saveSession}
         />
 
         <div className="flex-1 overflow-y-auto">
