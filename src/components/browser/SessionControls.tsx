@@ -1,5 +1,5 @@
 import { Button } from "@/components/ui/button";
-import { Play, Square, Monitor, RefreshCw, LogIn, Save } from "lucide-react";
+import { Play, Square, Monitor, RefreshCw, LogIn, Save, CheckCircle } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 
 interface SessionControlsProps {
@@ -12,6 +12,7 @@ interface SessionControlsProps {
   onTakeOver: () => void;
   onRefreshScreenshot: () => void;
   onSaveSession: () => void;
+  onConfirmLogin: () => void;
 }
 
 export function SessionControls({
@@ -24,6 +25,7 @@ export function SessionControls({
   onTakeOver,
   onRefreshScreenshot,
   onSaveSession,
+  onConfirmLogin,
 }: SessionControlsProps) {
   const isLoginSetup = session?.status === "login_setup";
 
@@ -51,7 +53,7 @@ export function SessionControls({
           </Button>
           {hasExistingProfile && (
             <p className="text-xs text-muted-foreground text-center">
-              ✓ Saved session profile found — logins will persist
+              ✓ Saved session data found — logins may persist
             </p>
           )}
         </div>
@@ -72,9 +74,10 @@ export function SessionControls({
             <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3 text-xs space-y-2">
               <p className="font-medium text-amber-700">Login Setup Mode</p>
               <ol className="list-decimal list-inside space-y-1 text-muted-foreground">
-                <li>Click <strong>Take Over</strong> to control the browser</li>
+                <li>Click <strong>Take Over</strong> to open the live browser</li>
                 <li>Log in to your target sites manually</li>
-                <li>Click <strong>Save Session</strong> to persist your login</li>
+                <li>Click <strong>I'm Logged In</strong> when done</li>
+                <li>Optionally click <strong>Save Session</strong> to persist cookies</li>
               </ol>
             </div>
           )}
@@ -98,14 +101,24 @@ export function SessionControls({
           </div>
 
           {isLoginSetup && (
-            <Button
-              onClick={onSaveSession}
-              className="w-full gap-2"
-              variant="default"
-            >
-              <Save className="w-4 h-4" />
-              Save Session
-            </Button>
+            <div className="space-y-2">
+              <Button
+                onClick={onConfirmLogin}
+                className="w-full gap-2"
+                variant="default"
+              >
+                <CheckCircle className="w-4 h-4" />
+                I'm Logged In
+              </Button>
+              <Button
+                onClick={onSaveSession}
+                className="w-full gap-2"
+                variant="secondary"
+              >
+                <Save className="w-4 h-4" />
+                Save Session (optional)
+              </Button>
+            </div>
           )}
         </>
       )}

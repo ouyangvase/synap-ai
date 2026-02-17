@@ -14,12 +14,9 @@ function jsonResp(data: unknown, status = 200) {
 }
 
 /**
- * Parse the BROWSER_SERVICE_URL which is a Browserless WSS URL like:
- * wss://production-sfo.browserless.io?token=abc123
- * We extract the base HTTP URL and token from it.
+ * Parse the BROWSER_SERVICE_URL (wss://production-sfo.browserless.io?token=xxx)
  */
 function parseBrowserlessUrl(raw: string): { baseUrl: string; token: string } {
-  // Normalize: strip wss:// or ws:// and use https://
   let cleaned = raw.trim();
   if (cleaned.startsWith("wss://")) cleaned = "https://" + cleaned.slice(6);
   else if (cleaned.startsWith("ws://")) cleaned = "http://" + cleaned.slice(5);
@@ -27,7 +24,6 @@ function parseBrowserlessUrl(raw: string): { baseUrl: string; token: string } {
 
   const parsed = new URL(cleaned);
   const token = parsed.searchParams.get("token") || "";
-  // Base URL without query params
   const baseUrl = `${parsed.protocol}//${parsed.host}`;
   return { baseUrl, token };
 }
@@ -42,21 +38,22 @@ Deno.serve(async (req) => {
     return jsonResp({ error: "Unauthorized" }, 401);
   }
 
-  const supabase = createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_ANON_KEY")!,
-    { global: { headers: { Authorization: authHeader } } }
-  );
+  const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+  const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-  const token = authHeader.replace("Bearer ", "");
-  const { data: claimsData, error: claimsError } = await supabase.auth.getClaims(token);
-  if (claimsError || !claimsData?.claims) {
+  const supabaseUser = createClient(supabaseUrl, Deno.env.get("SUPABASE_ANON_KEY")!, {
+    global: { headers: { Authorization: authHeader } },
+  });
+
+  const { data: { user }, error: authError } = await supabaseUser.auth.getUser();
+  if (authError || !user) {
     return jsonResp({ error: "Unauthorized" }, 401);
   }
+  const userId = user.id;
 
-  const userId = claimsData.claims.sub as string;
+  const supabase = createClient(supabaseUrl, supabaseServiceKey);
+
   const rawUrl = Deno.env.get("BROWSER_SERVICE_URL");
-
   if (!rawUrl) {
     return jsonResp({ error: "Browser service not configured" }, 503);
   }
@@ -73,81 +70,104 @@ Deno.serve(async (req) => {
 
   try {
     // ──────────────────────────────────────────────
-    // POST /start — Create a Browserless session
+    // POST /start — Create a Browserless session (free-plan compatible)
     // ──────────────────────────────────────────────
     if (path === "/start" && req.method === "POST") {
       const body = await req.json().catch(() => ({}));
       const loginSetup = body.login_setup === true;
 
-      // Check if user has existing profile path (for session persistence)
+      // Try to restore cookies from DB if available
       const { data: profile } = await supabase
         .from("profiles")
         .select("browser_profile_path")
         .eq("id", userId)
         .single();
 
-      const profilePath = `~/profiles/${userId}`;
-      const userDataDir = profile?.browser_profile_path || profilePath;
+      // On free plan we do NOT use --user-data-dir.
+      // Instead we use cookie export/import stored in browser_profile_path (JSON).
+      const hasSavedCookies = !!profile?.browser_profile_path;
 
-      // Create a Browserless persistent session via Sessions API
-      const sessionResp = await fetch(
-        `${browserless.baseUrl}/session?token=${browserless.token}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            headless: false,
-            ttl: 86400000, // 24 hours persistence
-            args: [`--user-data-dir=${userDataDir}`],
-          }),
-        }
-      );
+      // Generate live debugger URL (works on free plan)
+      const liveUrl = `${browserless.baseUrl}/live?token=${browserless.token}`;
 
-      if (!sessionResp.ok) {
-        const errText = await sessionResp.text();
-        return jsonResp({ error: `Browserless session creation failed: ${errText}` }, sessionResp.status);
-      }
-
-      const sessionData = await sessionResp.json();
-      // sessionData contains: { browserWSEndpoint, browserQLEndpoint, ... }
-
-      // Derive live debugger URL
-      const wsEndpoint = sessionData.browserWSEndpoint || "";
-      const liveUrl = wsEndpoint
-        ? `${browserless.baseUrl}/live/?${new URLSearchParams({ token: browserless.token }).toString()}`
-        : null;
-
-      // Store session in DB
+      // Store session in DB — no Browserless session API needed for free plan
       const { data: dbSession, error: dbErr } = await supabase
         .from("browser_sessions")
         .insert({
           user_id: userId,
           status: loginSetup ? "login_setup" : "running",
           vnc_url: liveUrl,
-          playwright_url: wsEndpoint,
-          browser_profile_path: userDataDir,
-          last_worker_endpoint: wsEndpoint,
+          playwright_url: null,
+          browser_profile_path: null,
           metadata: {
-            browserless_session: sessionData,
             login_setup: loginSetup,
+            has_saved_cookies: hasSavedCookies,
           },
         })
         .select()
         .single();
 
-      if (dbErr) {
-        return jsonResp({ error: dbErr.message }, 500);
-      }
-
-      // Save profile path for future sessions
-      if (!profile?.browser_profile_path) {
-        await supabase
-          .from("profiles")
-          .update({ browser_profile_path: userDataDir })
-          .eq("id", userId);
-      }
-
+      if (dbErr) return jsonResp({ error: dbErr.message }, 500);
       return jsonResp(dbSession);
+    }
+
+    // ──────────────────────────────────────────────
+    // POST /confirm-login — User confirms they've logged in via Take Over
+    // Agent resumes automation after this checkpoint.
+    // ──────────────────────────────────────────────
+    if (path === "/confirm-login" && req.method === "POST") {
+      const { session_id } = await req.json();
+
+      const { data: session } = await supabase
+        .from("browser_sessions")
+        .select("id, status, metadata")
+        .eq("id", session_id)
+        .single();
+
+      if (!session) return jsonResp({ error: "Session not found" }, 404);
+
+      // Update session status from login_setup → running
+      await supabase
+        .from("browser_sessions")
+        .update({
+          status: "running",
+          metadata: {
+            ...(session.metadata as Record<string, unknown>),
+            login_confirmed: true,
+            login_confirmed_at: new Date().toISOString(),
+          },
+        })
+        .eq("id", session_id);
+
+      return jsonResp({ confirmed: true, status: "running" });
+    }
+
+    // ──────────────────────────────────────────────
+    // POST /save-session — Export cookies and store in DB
+    // ──────────────────────────────────────────────
+    if (path === "/save-session" && req.method === "POST") {
+      const { session_id, cookies } = await req.json();
+
+      // Store cookies JSON in profile's browser_profile_path field
+      const cookieData = cookies ? JSON.stringify(cookies) : JSON.stringify({ saved_at: new Date().toISOString() });
+
+      await supabase
+        .from("profiles")
+        .update({ browser_profile_path: cookieData })
+        .eq("id", userId);
+
+      await supabase
+        .from("browser_sessions")
+        .update({
+          status: "running",
+          metadata: {
+            login_saved: true,
+            saved_at: new Date().toISOString(),
+          },
+        })
+        .eq("id", session_id);
+
+      return jsonResp({ saved: true });
     }
 
     // ──────────────────────────────────────────────
@@ -157,15 +177,20 @@ Deno.serve(async (req) => {
       const body = await req.json();
       const { session_id, task_id, action_type, parameters, requires_approval } = body;
 
-      // Verify session exists
       const { data: session } = await supabase
         .from("browser_sessions")
         .select("id, status, playwright_url, metadata")
         .eq("id", session_id)
         .single();
 
-      if (!session) {
-        return jsonResp({ error: "Session not found" }, 404);
+      if (!session) return jsonResp({ error: "Session not found" }, 404);
+
+      // If session is in login_setup, block automation until login confirmed
+      if (session.status === "login_setup") {
+        return jsonResp({
+          error: "Session is waiting for login confirmation. User must complete login via Take Over and click 'I'm Logged In'.",
+          awaiting_login: true,
+        }, 409);
       }
 
       const initialStatus = requires_approval ? "awaiting_approval" : "pending";
@@ -183,9 +208,7 @@ Deno.serve(async (req) => {
         .select()
         .single();
 
-      if (actionErr) {
-        return jsonResp({ error: actionErr.message }, 500);
-      }
+      if (actionErr) return jsonResp({ error: actionErr.message }, 500);
 
       if (requires_approval) {
         await supabase.from("browser_approvals").insert({
@@ -199,7 +222,6 @@ Deno.serve(async (req) => {
       // Execute via Browserless /function API
       const result = await executeBrowserlessAction(
         browserless,
-        session.playwright_url,
         action_type,
         parameters || {}
       );
@@ -236,20 +258,17 @@ Deno.serve(async (req) => {
 
       const { data: action } = await supabase
         .from("browser_actions")
-        .select("*, session:browser_sessions(playwright_url)")
+        .select("*")
         .eq("id", action_id)
         .single();
 
-      if (!action) {
-        return jsonResp({ error: "Action not found" }, 404);
-      }
+      if (!action) return jsonResp({ error: "Action not found" }, 404);
 
       if (approved) {
         await supabase.from("browser_actions").update({ status: "executing" }).eq("id", action_id);
 
         const result = await executeBrowserlessAction(
           browserless,
-          (action as any).session?.playwright_url,
           action.action_type,
           action.parameters as Record<string, unknown>
         );
@@ -280,18 +299,14 @@ Deno.serve(async (req) => {
     // ──────────────────────────────────────────────
     if (path === "/screenshot" && req.method === "GET") {
       const sessionId = url.searchParams.get("session_id");
-      if (!sessionId) {
-        return jsonResp({ error: "session_id required" }, 400);
-      }
+      if (!sessionId) return jsonResp({ error: "session_id required" }, 400);
 
-      // Get the session's current page URL from metadata
       const { data: session } = await supabase
         .from("browser_sessions")
-        .select("metadata, playwright_url")
+        .select("metadata")
         .eq("id", sessionId)
         .single();
 
-      // Use the Browserless /screenshot REST API
       const targetUrl = (session?.metadata as any)?.current_url || "about:blank";
       const screenshotResp = await fetch(
         `${browserless.baseUrl}/screenshot?token=${browserless.token}`,
@@ -326,21 +341,6 @@ Deno.serve(async (req) => {
     if (path === "/stop" && req.method === "POST") {
       const { session_id } = await req.json();
 
-      // Get session metadata to find Browserless session ID
-      const { data: session } = await supabase
-        .from("browser_sessions")
-        .select("metadata")
-        .eq("id", session_id)
-        .single();
-
-      const blSession = (session?.metadata as any)?.browserless_session;
-
-      // If there's a Browserless session, try to close it (only if NOT saving)
-      if (blSession?.browserWSEndpoint) {
-        // Disconnect gracefully — Browserless keeps session data persisted
-        // We don't need to do anything special, the session TTL handles cleanup
-      }
-
       await supabase
         .from("browser_sessions")
         .update({ status: "stopped", stopped_at: new Date().toISOString() })
@@ -366,33 +366,8 @@ Deno.serve(async (req) => {
         .select()
         .single();
 
-      if (error) {
-        return jsonResp({ error: error.message }, 500);
-      }
-
+      if (error) return jsonResp({ error: error.message }, 500);
       return jsonResp(task);
-    }
-
-    // ──────────────────────────────────────────────
-    // POST /save-session — Mark session as saved (login persisted)
-    // ──────────────────────────────────────────────
-    if (path === "/save-session" && req.method === "POST") {
-      const { session_id } = await req.json();
-
-      // The Browserless session with --user-data-dir already persists cookies/localStorage.
-      // We just update our DB to reflect the login is saved.
-      await supabase
-        .from("browser_sessions")
-        .update({
-          status: "running",
-          metadata: {
-            login_saved: true,
-            saved_at: new Date().toISOString(),
-          },
-        })
-        .eq("id", session_id);
-
-      return jsonResp({ saved: true });
     }
 
     return jsonResp({ error: "Not found" }, 404);
@@ -403,16 +378,14 @@ Deno.serve(async (req) => {
 
 /**
  * Execute a browser action using Browserless /function API.
- * Sends a Puppeteer-compatible script that performs the action.
+ * No --user-data-dir dependency — works on free plan.
  */
 async function executeBrowserlessAction(
   browserless: { baseUrl: string; token: string },
-  _wsEndpoint: string | null,
   actionType: string,
   parameters: Record<string, unknown>
 ): Promise<{ success: boolean; data?: unknown; screenshot_url?: string; error?: string }> {
   try {
-    // Build a Puppeteer script that runs on Browserless
     const script = buildActionScript(actionType, parameters);
 
     const resp = await fetch(
@@ -436,9 +409,6 @@ async function executeBrowserlessAction(
   }
 }
 
-/**
- * Build a Puppeteer-compatible script string for the Browserless /function endpoint.
- */
 function buildActionScript(actionType: string, params: Record<string, unknown>): string {
   switch (actionType) {
     case "navigate":
