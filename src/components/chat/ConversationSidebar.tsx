@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { Button } from "@/components/ui/button";
-import { Plus, MessageSquare, LogOut, X, Bot, Monitor } from "lucide-react";
+import { Plus, MessageSquare, LogOut, X, Bot, Monitor, Calendar } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { formatDistanceToNow } from "date-fns";
@@ -77,6 +77,10 @@ export function ConversationSidebar({ activeId, onSelect, onNew, open, onClose }
         <Button onClick={() => navigate("/browser")} variant="outline" className="w-full justify-start gap-2 text-sm">
           <Monitor className="w-4 h-4" />
           Browser Agent
+        </Button>
+        <Button onClick={() => navigate("/jobs")} variant="outline" className="w-full justify-start gap-2 text-sm">
+          <Calendar className="w-4 h-4" />
+          Jobs & Automation
         </Button>
       </div>
 

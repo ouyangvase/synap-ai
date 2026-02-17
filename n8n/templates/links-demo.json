@@ -8,7 +8,7 @@
         "responseMode": "responseNode",
         "options": {}
       },
-      "id": "webhook-3",
+      "id": "webhook-links",
       "name": "Webhook",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
@@ -17,19 +17,53 @@
     },
     {
       "parameters": {
+        "method": "GET",
+        "url": "={{ 'https://searx.be/search?q=' + encodeURIComponent($json.body.input.query) + '&format=json&categories=general&pageno=1' }}",
+        "options": {
+          "timeout": 10000,
+          "redirect": {
+            "redirect": {}
+          }
+        }
+      },
+      "id": "http-links",
+      "name": "Search API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [470, 300],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract input parameters\nconst input = $('Webhook').first().json.body.input;\nconst query = input.query || 'general';\nconst numResults = input.num_results || 5;\nconst recencyDays = input.recency_days || null;\n\n// Try to parse search API results; fall back to mock data\nlet results = [];\ntry {\n  const apiData = $input.first().json;\n  if (apiData && apiData.results && apiData.results.length > 0) {\n    results = apiData.results.slice(0, numResults).map(r => ({\n      title: r.title || 'Untitled',\n      url: r.url || '',\n      snippet: r.content || r.snippet || ''\n    }));\n  }\n} catch (e) {\n  // API call failed or returned unexpected format\n}\n\n// If no results from API, return mock data\nif (results.length === 0) {\n  results = [\n    {\n      title: `Result 1 for \"${query}\"`,\n      url: `https://example.com/search?q=${encodeURIComponent(query)}&r=1`,\n      snippet: `This is a sample search result for your query \"${query}\". In production, this would come from a live search API.`\n    },\n    {\n      title: `Result 2 for \"${query}\"`,\n      url: `https://example.com/search?q=${encodeURIComponent(query)}&r=2`,\n      snippet: `Another relevant result for \"${query}\". Connect a real search provider for live data.`\n    },\n    {\n      title: `Result 3 for \"${query}\"`,\n      url: `https://example.com/search?q=${encodeURIComponent(query)}&r=3`,\n      snippet: `A third result related to \"${query}\". Replace with SearXNG, Google, or Brave Search API.`\n    }\n  ].slice(0, numResults);\n}\n\n// Filter by recency if specified (mock: just annotate)\nif (recencyDays) {\n  results = results.map(r => ({\n    ...r,\n    snippet: r.snippet + ` (filtered to last ${recencyDays} days)`\n  }));\n}\n\n// Build markdown\nconst markdownLines = [`## Search Results for \"${query}\"`, ''];\nresults.forEach((r, i) => {\n  markdownLines.push(`### ${i + 1}. ${r.title}`);\n  markdownLines.push(`${r.snippet}`);\n  markdownLines.push(`[${r.url}](${r.url})`);\n  markdownLines.push('');\n});\nmarkdownLines.push(`---`);\nmarkdownLines.push(`*${results.length} result(s) returned*`);\nconst markdownContent = markdownLines.join('\\n');\n\n// Build HTML\nconst htmlItems = results.map(r =>\n  `<li><strong><a href=\"${r.url}\">${r.title}</a></strong><br/>${r.snippet}</li>`\n).join('\\n');\nconst htmlContent = `<h2>Search Results for \"${query}\"</h2>\\n<ol>\\n${htmlItems}\\n</ol>\\n<p><em>${results.length} result(s) returned</em></p>`;\n\n// Collect navigation URLs\nconst navigationUrls = results.map(r => r.url);\n\nreturn [{\n  json: {\n    markdown_content: markdownContent,\n    html_content: htmlContent,\n    attachment_urls: [],\n    navigation_urls: navigationUrls\n  }\n}];"
+      },
+      "id": "func-links",
+      "name": "Format Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ { \"markdown_content\": \"Here are some useful links based on your query: **\" + ($json.body.input.query || 'general') + \"**\", \"html_content\": \"<ul><li><a href='https://docs.n8n.io'>n8n Docs</a></li><li><a href='https://github.com'>GitHub</a></li></ul>\", \"attachment_urls\": [], \"navigation_urls\": [\"https://docs.n8n.io\", \"https://github.com\"] } }}",
+        "responseBody": "={{ $json }}",
         "options": {}
       },
-      "id": "respond-3",
+      "id": "respond-links",
       "name": "Respond to Webhook",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
-      "position": [470, 300]
+      "position": [910, 300]
     }
   ],
   "connections": {
     "Webhook": {
+      "main": [[{ "node": "Search API", "type": "main", "index": 0 }]]
+    },
+    "Search API": {
+      "main": [[{ "node": "Format Results", "type": "main", "index": 0 }]]
+    },
+    "Format Results": {
       "main": [[{ "node": "Respond to Webhook", "type": "main", "index": 0 }]]
     }
   },

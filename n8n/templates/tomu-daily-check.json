@@ -1,0 +1,51 @@
+{
+  "name": "Tomu Daily Check Tool",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "tomu-daily-check",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-tomu",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 300],
+      "webhookId": "tomu-daily-check-webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract date from input or use today\nconst input = $json.body.input || {};\nconst rawDate = input.date || null;\n\nlet dateStr;\nif (rawDate) {\n  // Try to parse the provided date\n  const parsed = new Date(rawDate);\n  dateStr = isNaN(parsed.getTime())\n    ? rawDate\n    : parsed.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });\n} else {\n  dateStr = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });\n}\n\n// Sample daily tasks\nconst tasks = [\n  { id: 1, title: 'Check order status', completed: false, priority: 'high' },\n  { id: 2, title: 'Review new signups', completed: false, priority: 'medium' },\n  { id: 3, title: 'Process pending deliveries', completed: false, priority: 'high' },\n  { id: 4, title: 'Update inventory', completed: true, priority: 'low' }\n];\n\nconst pending = tasks.filter(t => !t.completed);\nconst completed = tasks.filter(t => t.completed);\n\n// Build markdown\nconst taskLines = tasks.map(t => {\n  const checkbox = t.completed ? '[x]' : '[ ]';\n  const priorityBadge = t.priority === 'high' ? ' :red_circle:' : t.priority === 'medium' ? ' :yellow_circle:' : '';\n  return `- ${checkbox} ${t.title}${priorityBadge}`;\n}).join('\\n');\n\nconst markdownContent = [\n  `## Daily Check - ${dateStr}`,\n  '',\n  taskLines,\n  '',\n  `**Summary:** ${pending.length} pending task${pending.length !== 1 ? 's' : ''}, ${completed.length} completed.`\n].join('\\n');\n\nreturn [{\n  json: {\n    markdown_content: markdownContent,\n    tasks: tasks,\n    status: 'ok'\n  }\n}];"
+      },
+      "id": "func-tomu",
+      "name": "Generate Daily Tasks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "respond-tomu",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [690, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Generate Daily Tasks", "type": "main", "index": 0 }]]
+    },
+    "Generate Daily Tasks": {
+      "main": [[{ "node": "Respond to Webhook", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "meta": { "templateCredsSetupCompleted": true }
+}

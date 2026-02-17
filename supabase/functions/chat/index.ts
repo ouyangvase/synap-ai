@@ -29,7 +29,7 @@ serve(async (req) => {
     const authHeader = req.headers.get("Authorization");
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const lovableApiKey = Deno.env.get("LOVABLE_API_KEY")!;
+    const geminiApiKey = Deno.env.get("GEMINI_API_KEY")!;
 
     // Auth: create client with user's token
     const supabaseUser = createClient(supabaseUrl, Deno.env.get("SUPABASE_ANON_KEY")!, {
@@ -66,7 +66,9 @@ serve(async (req) => {
 
     const agent = conversation.agents;
     const systemPrompt = agent?.system_prompt || "You are a helpful AI assistant.";
-    const model = agent?.model || "google/gemini-3-flash-preview";
+    let model = agent?.model || "gemini-2.0-flash";
+    // Strip provider prefix if present (e.g., "google/gemini-3-flash-preview" -> "gemini-2.0-flash")
+    if (model.startsWith("google/")) model = "gemini-2.0-flash";
 
     // Get available tools for this agent
     let tools: ToolDef[] = [];
@@ -123,11 +125,11 @@ serve(async (req) => {
     }
 
     const llmResponse = await fetchWithRetry(
-      "https://ai.gateway.lovable.dev/v1/chat/completions",
+      "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
       {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${lovableApiKey}`,
+          Authorization: `Bearer ${geminiApiKey}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify(llmBody),
@@ -316,6 +318,14 @@ async function executeToolRun(
     }
 
     const ep = endpoint as ToolEndpoint;
+
+    // Resolve N8N_WEBHOOK_BASE_URL placeholder in endpoint URL
+    let resolvedUrl = ep.endpoint_url;
+    const n8nBase = Deno.env.get("N8N_WEBHOOK_BASE_URL");
+    if (n8nBase && resolvedUrl.includes("{N8N_WEBHOOK_BASE_URL}")) {
+      resolvedUrl = resolvedUrl.replace("{N8N_WEBHOOK_BASE_URL}", n8nBase.replace(/\/$/, ""));
+    }
+
     const payload = {
       meta: { tool_name: tool.name, tool_run_id: toolRunId, user_id: userId, conversation_id: conversationId },
       input,
@@ -327,7 +337,7 @@ async function executeToolRun(
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), ep.timeout_ms);
 
-        const resp = await fetch(ep.endpoint_url, {
+        const resp = await fetch(resolvedUrl, {
           method: ep.http_method,
           headers: { "Content-Type": "application/json", ...(ep.headers as Record<string, string>) },
           body: JSON.stringify(payload),

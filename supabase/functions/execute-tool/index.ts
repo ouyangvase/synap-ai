@@ -76,6 +76,14 @@ serve(async (req) => {
     }
 
     const tool = toolRun.tools;
+
+    // Resolve N8N_WEBHOOK_BASE_URL placeholder in endpoint URL
+    let resolvedUrl = endpoint.endpoint_url;
+    const n8nBase = Deno.env.get("N8N_WEBHOOK_BASE_URL");
+    if (n8nBase && resolvedUrl.includes("{N8N_WEBHOOK_BASE_URL}")) {
+      resolvedUrl = resolvedUrl.replace("{N8N_WEBHOOK_BASE_URL}", n8nBase.replace(/\/$/, ""));
+    }
+
     const payload = {
       meta: { tool_name: tool.name, tool_run_id, user_id: user.id, conversation_id },
       input: toolRun.input,
@@ -87,7 +95,7 @@ serve(async (req) => {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), endpoint.timeout_ms);
 
-        const resp = await fetch(endpoint.endpoint_url, {
+        const resp = await fetch(resolvedUrl, {
           method: endpoint.http_method,
           headers: { "Content-Type": "application/json", ...(endpoint.headers as Record<string, string>) },
           body: JSON.stringify(payload),

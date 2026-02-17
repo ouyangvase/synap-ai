@@ -1,0 +1,51 @@
+{
+  "name": "Report Summarizer Tool",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "report-summarizer",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-summarizer",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 300],
+      "webhookId": "report-summarizer-webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract input\nconst input = $json.body.input || {};\nconst text = input.text || '';\nconst format = input.format || 'markdown';\n\nif (!text.trim()) {\n  return [{\n    json: {\n      markdown_content: '**Error:** No text provided for summarization.',\n      summary: '',\n      key_points: [],\n      word_count: 0\n    }\n  }];\n}\n\n// Count words\nconst words = text.trim().split(/\\s+/);\nconst wordCount = words.length;\n\n// Split text into sentences\n// Handle common abbreviations and edge cases\nconst sentences = text\n  .replace(/([.!?])\\s+/g, '$1|SPLIT|')\n  .split('|SPLIT|')\n  .map(s => s.trim())\n  .filter(s => s.length > 0);\n\n// Pick first 3 sentences as key points\nconst keyPoints = sentences.slice(0, 3).map(s => {\n  // Clean up and ensure each point ends with punctuation\n  let point = s.trim();\n  if (!/[.!?]$/.test(point)) {\n    point += '.';\n  }\n  return point;\n});\n\n// Build a summary from key points\nconst summary = keyPoints.join(' ');\n\n// Build markdown output\nconst keyPointsList = keyPoints.map((p, i) => `${i + 1}. ${p}`).join('\\n');\nconst markdownContent = [\n  '## Report Summary',\n  '',\n  `> ${summary}`,\n  '',\n  '### Key Points',\n  '',\n  keyPointsList,\n  '',\n  '---',\n  `**Word count:** ${wordCount} | **Sentences analyzed:** ${sentences.length} | **Key points extracted:** ${keyPoints.length}`\n].join('\\n');\n\nreturn [{\n  json: {\n    markdown_content: markdownContent,\n    summary: summary,\n    key_points: keyPoints,\n    word_count: wordCount\n  }\n}];"
+      },
+      "id": "func-summarizer",
+      "name": "Summarize Text",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "respond-summarizer",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [690, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Summarize Text", "type": "main", "index": 0 }]]
+    },
+    "Summarize Text": {
+      "main": [[{ "node": "Respond to Webhook", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "meta": { "templateCredsSetupCompleted": true }
+}
