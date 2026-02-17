@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { Button } from "@/components/ui/button";
-import { Plus, MessageSquare, LogOut, X, Bot } from "lucide-react";
+import { Plus, MessageSquare, LogOut, X, Bot, Monitor } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { formatDistanceToNow } from "date-fns";
 
@@ -23,6 +24,7 @@ interface Props {
 
 export function ConversationSidebar({ activeId, onSelect, onNew, open, onClose }: Props) {
   const { user, signOut } = useAuth();
+  const navigate = useNavigate();
   const [conversations, setConversations] = useState<Conversation[]>([]);
 
   const fetchConversations = async () => {
@@ -71,6 +73,10 @@ export function ConversationSidebar({ activeId, onSelect, onNew, open, onClose }
         <Button onClick={onNew} variant="outline" className="w-full justify-start gap-2 text-sm border-dashed">
           <Plus className="w-4 h-4" />
           New conversation
+        </Button>
+        <Button onClick={() => navigate("/browser")} variant="outline" className="w-full justify-start gap-2 text-sm">
+          <Monitor className="w-4 h-4" />
+          Browser Agent
         </Button>
       </div>
 
