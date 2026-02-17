@@ -1,0 +1,197 @@
+import { useState, useEffect } from "react";
+import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/hooks/useAuth";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import {
+  Wrench, Clock, CheckCircle2, XCircle, Loader2, AlertTriangle,
+  ChevronDown, ChevronUp
+} from "lucide-react";
+import { cn } from "@/lib/utils";
+import { useToast } from "@/hooks/use-toast";
+import { formatDistanceToNow } from "date-fns";
+import type { Json } from "@/integrations/supabase/types";
+
+interface ToolRun {
+  id: string;
+  tool_id: string;
+  tool_call_id: string;
+  status: string;
+  input: Json;
+  output: Json | null;
+  error: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+interface ToolApproval {
+  id: string;
+  tool_run_id: string;
+  status: string;
+  reason: string | null;
+}
+
+interface Props {
+  toolRun: ToolRun;
+  conversationId: string;
+}
+
+const statusConfig: Record<string, { icon: React.ElementType; color: string; label: string }> = {
+  pending: { icon: Clock, color: "text-tool-pending", label: "Awaiting approval" },
+  approved: { icon: CheckCircle2, color: "text-tool-approved", label: "Approved" },
+  rejected: { icon: XCircle, color: "text-tool-rejected", label: "Rejected" },
+  running: { icon: Loader2, color: "text-tool-running", label: "Running" },
+  completed: { icon: CheckCircle2, color: "text-tool-completed", label: "Completed" },
+  failed: { icon: AlertTriangle, color: "text-tool-failed", label: "Failed" },
+  timed_out: { icon: AlertTriangle, color: "text-tool-failed", label: "Timed out" },
+};
+
+export function ToolCard({ toolRun, conversationId }: Props) {
+  const { user } = useAuth();
+  const { toast } = useToast();
+  const [toolName, setToolName] = useState<string>("");
+  const [approval, setApproval] = useState<ToolApproval | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [approving, setApproving] = useState(false);
+
+  useEffect(() => {
+    // Fetch tool name
+    supabase.from("tools").select("name").eq("id", toolRun.tool_id).single()
+      .then(({ data }) => { if (data) setToolName(data.name); });
+
+    // Fetch approval if exists
+    supabase.from("tool_approvals").select("*").eq("tool_run_id", toolRun.id).maybeSingle()
+      .then(({ data }) => { if (data) setApproval(data); });
+  }, [toolRun.id, toolRun.tool_id, toolRun.status]);
+
+  const handleApproval = async (decision: "approved" | "rejected") => {
+    if (!user) return;
+    setApproving(true);
+    try {
+      if (approval) {
+        await supabase
+          .from("tool_approvals")
+          .update({ status: decision, approver_id: user.id, resolved_at: new Date().toISOString() })
+          .eq("id", approval.id);
+      }
+      // Update tool run status
+      await supabase
+        .from("tool_runs")
+        .update({ status: decision === "approved" ? "approved" : "rejected" })
+        .eq("id", toolRun.id);
+      
+      // If approved, trigger execution via edge function
+      if (decision === "approved") {
+        await supabase.functions.invoke("execute-tool", {
+          body: { tool_run_id: toolRun.id, conversation_id: conversationId },
+        });
+      }
+    } catch (err: any) {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    } finally {
+      setApproving(false);
+    }
+  };
+
+  const config = statusConfig[toolRun.status] || statusConfig.pending;
+  const StatusIcon = config.icon;
+  const output = toolRun.output as Record<string, unknown> | null;
+
+  return (
+    <div className="max-w-3xl mx-auto px-2 py-2">
+      <div className="border border-border rounded-lg bg-card overflow-hidden">
+        {/* Header */}
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="w-full flex items-center justify-between px-4 py-3 hover:bg-secondary/30 transition-colors"
+        >
+          <div className="flex items-center gap-2.5">
+            <Wrench className="w-4 h-4 text-muted-foreground" />
+            <span className="font-mono text-xs font-medium">{toolName || "tool"}</span>
+            <Badge variant="outline" className={cn("text-[10px] px-1.5 py-0", config.color)}>
+              <StatusIcon className={cn("w-3 h-3 mr-1", toolRun.status === "running" && "animate-spin")} />
+              {config.label}
+            </Badge>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] text-muted-foreground">
+              {formatDistanceToNow(new Date(toolRun.created_at), { addSuffix: true })}
+            </span>
+            {expanded ? <ChevronUp className="w-3.5 h-3.5 text-muted-foreground" /> : <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" />}
+          </div>
+        </button>
+
+        {expanded && (
+          <div className="border-t border-border px-4 py-3 space-y-3">
+            {/* Inputs */}
+            <div>
+              <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Input</p>
+              <pre className="text-xs font-mono bg-secondary rounded p-2 overflow-x-auto max-h-40">
+                {JSON.stringify(toolRun.input, null, 2)}
+              </pre>
+            </div>
+
+            {/* Output */}
+            {output && (
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Output</p>
+                {(output as any).markdown_content ? (
+                  <div className="prose prose-sm prose-invert max-w-none text-xs bg-secondary rounded p-2">
+                    {(output as any).markdown_content}
+                  </div>
+                ) : (
+                  <pre className="text-xs font-mono bg-secondary rounded p-2 overflow-x-auto max-h-40">
+                    {JSON.stringify(output, null, 2)}
+                  </pre>
+                )}
+              </div>
+            )}
+
+            {/* Error */}
+            {toolRun.error && (
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-destructive mb-1">Error</p>
+                <pre className="text-xs font-mono bg-destructive/10 text-destructive rounded p-2">
+                  {toolRun.error}
+                </pre>
+              </div>
+            )}
+
+            {/* Timestamps */}
+            <div className="flex gap-4 text-[10px] text-muted-foreground">
+              {toolRun.started_at && <span>Started: {new Date(toolRun.started_at).toLocaleTimeString()}</span>}
+              {toolRun.completed_at && <span>Completed: {new Date(toolRun.completed_at).toLocaleTimeString()}</span>}
+            </div>
+          </div>
+        )}
+
+        {/* Approval bar */}
+        {toolRun.status === "pending" && approval?.status === "pending" && (
+          <div className="border-t border-border px-4 py-3 flex items-center justify-between bg-tool-pending/5">
+            <span className="text-xs text-tool-pending font-medium">This tool requires your approval</span>
+            <div className="flex gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => handleApproval("rejected")}
+                disabled={approving}
+                className="h-7 text-xs border-destructive/30 text-destructive hover:bg-destructive/10"
+              >
+                Reject
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => handleApproval("approved")}
+                disabled={approving}
+                className="h-7 text-xs"
+              >
+                {approving ? <Loader2 className="w-3 h-3 animate-spin" /> : "Approve"}
+              </Button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
