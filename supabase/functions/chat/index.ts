@@ -227,6 +227,8 @@ serve(async (req) => {
 
           // Handle tool calls
           if (toolCallsList.length > 0) {
+            const toolResultMessages: any[] = [];
+
             for (const tc of toolCallsList) {
               const tool = tools.find((t) => t.name === tc.function.name);
               if (!tool) continue;
@@ -261,6 +263,93 @@ serve(async (req) => {
                 controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "tool_call", tool_run_id: toolRun.id, tool_name: tool.name })}\n\n`));
                 await executeToolRun(supabase, toolRun.id, tool, parsedArgs, user.id, conversation_id);
                 controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "tool_result", tool_run_id: toolRun.id })}\n\n`));
+
+                // Get the tool result from DB for follow-up LLM call
+                const { data: completedRun } = await supabase
+                  .from("tool_runs")
+                  .select("output, status, tool_call_id")
+                  .eq("id", toolRun.id)
+                  .single();
+
+                if (completedRun) {
+                  const resultContent = completedRun.output?.markdown_content || JSON.stringify(completedRun.output || {});
+                  toolResultMessages.push({
+                    role: "tool",
+                    content: resultContent,
+                    tool_call_id: completedRun.tool_call_id,
+                  });
+                }
+              }
+            }
+
+            // --- Follow-up LLM call: send tool results back to get a summary ---
+            if (toolResultMessages.length > 0) {
+              // Build messages: original context + assistant tool_calls + tool results
+              const followUpMessages = [
+                ...llmMessages,
+                { role: "assistant", content: fullContent || null, tool_calls: toolCallsList.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.function.name, arguments: tc.function.arguments } })) },
+                ...toolResultMessages,
+              ];
+
+              const followUpBody: any = {
+                model,
+                messages: followUpMessages,
+                stream: true,
+              };
+              if (llmTools.length > 0) followUpBody.tools = llmTools;
+
+              const followUpResp = await fetchWithRetry(
+                "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+                {
+                  method: "POST",
+                  headers: {
+                    Authorization: `Bearer ${geminiApiKey}`,
+                    "Content-Type": "application/json",
+                  },
+                  body: JSON.stringify(followUpBody),
+                }
+              );
+
+              if (followUpResp.ok) {
+                const followReader = followUpResp.body!.getReader();
+                const followDecoder = new TextDecoder();
+                let followBuffer = "";
+                let followContent = "";
+
+                while (true) {
+                  const { done: fDone, value: fValue } = await followReader.read();
+                  if (fDone) break;
+                  followBuffer += followDecoder.decode(fValue, { stream: true });
+
+                  let fIdx: number;
+                  while ((fIdx = followBuffer.indexOf("\n")) !== -1) {
+                    let fLine = followBuffer.slice(0, fIdx);
+                    followBuffer = followBuffer.slice(fIdx + 1);
+                    if (fLine.endsWith("\r")) fLine = fLine.slice(0, -1);
+                    if (!fLine.startsWith("data: ") || fLine.trim() === "") continue;
+                    const fJson = fLine.slice(6).trim();
+                    if (fJson === "[DONE]") continue;
+
+                    try {
+                      const fParsed = JSON.parse(fJson);
+                      const fChoice = fParsed.choices?.[0];
+                      if (fChoice?.delta?.content) {
+                        followContent += fChoice.delta.content;
+                        controller.enqueue(encoder.encode(`data: ${JSON.stringify(fParsed)}\n\n`));
+                      }
+                    } catch {}
+                  }
+                }
+
+                // Save follow-up assistant message
+                if (followContent) {
+                  await supabase.from("messages").insert({
+                    conversation_id,
+                    user_id: user.id,
+                    role: "assistant",
+                    content: followContent,
+                  });
+                }
               }
             }
           }
