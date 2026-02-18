@@ -318,6 +318,45 @@ export type Database = {
           },
         ]
       }
+      image_generations: {
+        Row: {
+          id: string
+          user_id: string
+          prompt: string
+          style: string | null
+          aspect_ratio: string
+          image_url: string | null
+          status: string
+          error: string | null
+          metadata: Json
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          user_id: string
+          prompt: string
+          style?: string | null
+          aspect_ratio?: string
+          image_url?: string | null
+          status?: string
+          error?: string | null
+          metadata?: Json
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          user_id?: string
+          prompt?: string
+          style?: string | null
+          aspect_ratio?: string
+          image_url?: string | null
+          status?: string
+          error?: string | null
+          metadata?: Json
+          created_at?: string
+        }
+        Relationships: []
+      }
       conversations: {
         Row: {
           agent_id: string | null

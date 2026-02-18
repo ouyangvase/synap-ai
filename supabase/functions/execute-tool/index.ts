@@ -83,6 +83,10 @@ serve(async (req) => {
     if (n8nBase && resolvedUrl.includes("{N8N_WEBHOOK_BASE_URL}")) {
       resolvedUrl = resolvedUrl.replace("{N8N_WEBHOOK_BASE_URL}", n8nBase.replace(/\/$/, ""));
     }
+    // Resolve SUPABASE_URL placeholder in endpoint URL
+    if (supabaseUrl && resolvedUrl.includes("{SUPABASE_URL}")) {
+      resolvedUrl = resolvedUrl.replace("{SUPABASE_URL}", supabaseUrl.replace(/\/$/, ""));
+    }
 
     const payload = {
       meta: { tool_name: tool.name, tool_run_id, user_id: user.id, conversation_id },
@@ -97,7 +101,15 @@ serve(async (req) => {
 
         const resp = await fetch(resolvedUrl, {
           method: endpoint.http_method,
-          headers: { "Content-Type": "application/json", ...(endpoint.headers as Record<string, string>) },
+          headers: {
+            "Content-Type": "application/json",
+            ...(endpoint.headers as Record<string, string>),
+            // Add service role auth for internal Supabase function calls
+            ...(resolvedUrl.includes(supabaseUrl) ? {
+              Authorization: `Bearer ${supabaseServiceKey}`,
+              apikey: Deno.env.get("SUPABASE_ANON_KEY") || "",
+            } : {}),
+          },
           body: JSON.stringify(payload),
           signal: controller.signal,
         });

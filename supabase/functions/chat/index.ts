@@ -229,7 +229,7 @@ serve(async (req) => {
             let loopMessages = [...llmMessages];
             let currentToolCalls = toolCallsList;
             let currentContent = fullContent;
-            const MAX_AGENT_LOOPS = 8; // safety limit
+            const MAX_AGENT_LOOPS = 12; // autonomous agent needs more steps for complex tasks
 
             for (let agentLoop = 0; agentLoop < MAX_AGENT_LOOPS; agentLoop++) {
               const toolResultMessages: any[] = [];
@@ -471,6 +471,11 @@ async function executeToolRun(
     if (n8nBase && resolvedUrl.includes("{N8N_WEBHOOK_BASE_URL}")) {
       resolvedUrl = resolvedUrl.replace("{N8N_WEBHOOK_BASE_URL}", n8nBase.replace(/\/$/, ""));
     }
+    // Resolve SUPABASE_URL placeholder in endpoint URL
+    const supabaseUrlEnv = Deno.env.get("SUPABASE_URL");
+    if (supabaseUrlEnv && resolvedUrl.includes("{SUPABASE_URL}")) {
+      resolvedUrl = resolvedUrl.replace("{SUPABASE_URL}", supabaseUrlEnv.replace(/\/$/, ""));
+    }
 
     const payload = {
       meta: { tool_name: tool.name, tool_run_id: toolRunId, user_id: userId, conversation_id: conversationId },
@@ -485,7 +490,15 @@ async function executeToolRun(
 
         const resp = await fetch(resolvedUrl, {
           method: ep.http_method,
-          headers: { "Content-Type": "application/json", ...(ep.headers as Record<string, string>) },
+          headers: {
+            "Content-Type": "application/json",
+            ...(ep.headers as Record<string, string>),
+            // Add service role auth for internal Supabase function calls
+            ...(resolvedUrl.includes(Deno.env.get("SUPABASE_URL") || "NONE") ? {
+              Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || ""}`,
+              apikey: Deno.env.get("SUPABASE_ANON_KEY") || "",
+            } : {}),
+          },
           body: JSON.stringify(payload),
           signal: controller.signal,
         });

@@ -484,6 +484,26 @@ Deno.serve(async (req) => {
         });
       }
 
+      // ── browser_get_html ── (CRITICAL for autonomous operation)
+      if (toolName === "browser_get_html") {
+        const selector = (input.selector as string) || "body";
+        const maxLen = (input.max_length as number) || 8000;
+        const result = await executeBrowserlessAction(bl, "get_html", { selector, max_length: maxLen }, currentUrl);
+        const data = result.data as Record<string, unknown> || {};
+        const html = ((data.html as string) || "").substring(0, maxLen);
+
+        return jsonResp({
+          html,
+          selector,
+          title: data.title || "",
+          url: data.url || currentUrl || "",
+          success: result.success,
+          markdown_content: result.success
+            ? `HTML structure of \`${selector}\` on ${data.url || currentUrl}:\n\n\`\`\`html\n${html}\n\`\`\``
+            : `Failed to get HTML: ${result.error}`,
+        });
+      }
+
       return jsonResp({ error: `Unknown tool: ${toolName}`, markdown_content: `Unknown browser tool: ${toolName}` }, 400);
     } catch (err) {
       return jsonResp({
@@ -1218,6 +1238,40 @@ function buildActionScript(
         const finalUrl = page.url();
         return {
           data: { selected: true, selector, value, url: finalUrl },
+          type: "application/json",
+        };
+      }`;
+
+    case "get_html":
+      return `export default async function ({ page }) {
+        ${reconnectPreamble(false)}
+        const selector = ${JSON.stringify(params.selector || "body")};
+        const maxLen = ${Number(params.max_length) || 8000};
+        await page.waitForSelector(selector, { timeout: 15000 }).catch(() => {});
+        const html = await page.evaluate((sel, limit) => {
+          const el = document.querySelector(sel);
+          if (!el) return null;
+          // For body, return a cleaned version that's useful for finding selectors
+          if (sel === 'body') {
+            // Remove script, style, svg content to save space
+            const clone = el.cloneNode(true);
+            clone.querySelectorAll('script, style, svg, noscript, link[rel=stylesheet]').forEach(e => e.remove());
+            // Simplify: remove data-* attributes that aren't useful for selectors
+            clone.querySelectorAll('*').forEach(e => {
+              for (const attr of [...e.attributes]) {
+                if (attr.name.startsWith('data-') && !['data-testid', 'data-id', 'data-name', 'data-value', 'data-action'].includes(attr.name)) {
+                  e.removeAttribute(attr.name);
+                }
+              }
+            });
+            return clone.innerHTML.substring(0, limit);
+          }
+          return el.outerHTML.substring(0, limit);
+        }, selector, maxLen);
+        const finalUrl = page.url();
+        const title = await page.title();
+        return {
+          data: { html: html || '(element not found)', selector, title, url: finalUrl },
           type: "application/json",
         };
       }`;
