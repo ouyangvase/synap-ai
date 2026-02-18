@@ -234,6 +234,265 @@ Deno.serve(async (req) => {
     }
   }
 
+  // ──────────────────────────────────────────────
+  // POST /agent-action — Unified endpoint for AI agent browser tool calls.
+  // Called by the chat edge function (service-to-service), no user auth needed.
+  // Routes tool_name to the appropriate Browserless action.
+  // Manages session state via conversation_id metadata.
+  // Accepts: { input: {...}, meta: { tool_name, conversation_id, user_id, ... } }
+  // ──────────────────────────────────────────────
+  if (path === "/agent-action" && req.method === "POST") {
+    if (!rawUrl) {
+      return jsonResp({ error: "Browser service not configured" }, 503);
+    }
+    let bl: ReturnType<typeof parseBrowserlessUrl>;
+    try {
+      bl = parseBrowserlessUrl(rawUrl);
+    } catch {
+      return jsonResp({ error: "Invalid BROWSER_SERVICE_URL" }, 500);
+    }
+
+    const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey);
+
+    let body: Record<string, unknown> = {};
+    try { body = await req.json(); } catch {}
+    const input = (body.input as Record<string, unknown>) || {};
+    const meta = (body.meta as Record<string, unknown>) || {};
+    const toolName = (meta.tool_name as string) || "";
+    const conversationId = (meta.conversation_id as string) || "";
+    const userId = (meta.user_id as string) || "";
+
+    try {
+      // ── browser_start ──
+      if (toolName === "browser_start") {
+        const startUrl = (input.url as string) || "about:blank";
+        const wsEndpoint = bl.connectWs;
+        const liveUrl = `${bl.baseUrl}/live?token=${bl.token}`;
+
+        let initialTitle: string | null = null;
+        if (startUrl !== "about:blank") {
+          try {
+            const nav = await executeBrowserlessAction(bl, "navigate", { url: startUrl }, null);
+            if (nav.success && nav.data) {
+              initialTitle = (nav.data as Record<string, unknown>).title as string || null;
+            }
+          } catch {}
+        }
+
+        // Store session
+        const { data: dbSession, error: dbErr } = await supabaseAdmin
+          .from("browser_sessions")
+          .insert({
+            user_id: userId || null,
+            status: "running",
+            vnc_url: liveUrl,
+            playwright_url: wsEndpoint,
+            metadata: {
+              conversation_id: conversationId,
+              agent_controlled: true,
+              ws_endpoint: wsEndpoint,
+              current_url: startUrl !== "about:blank" ? startUrl : null,
+              initial_title: initialTitle,
+              started_at: new Date().toISOString(),
+            },
+          })
+          .select()
+          .single();
+
+        if (dbErr) return jsonResp({ error: `Failed to create session: ${dbErr.message}` }, 500);
+
+        return jsonResp({
+          session_id: dbSession.id,
+          live_url: liveUrl,
+          status: "running",
+          current_url: startUrl !== "about:blank" ? startUrl : null,
+          title: initialTitle,
+          markdown_content: `Browser session started.${startUrl !== "about:blank" ? ` Navigated to ${startUrl}.` : ""}\n\nSession ID: ${dbSession.id}\nLive View: ${liveUrl}\n\nThe user can watch the browser in the live view panel.`,
+        });
+      }
+
+      // ── For all other tools, find the active session for this conversation ──
+      let sessionId: string | null = null;
+      let sessionMeta: Record<string, unknown> = {};
+
+      if (conversationId) {
+        const { data: sessions } = await supabaseAdmin
+          .from("browser_sessions")
+          .select("id, metadata, status")
+          .eq("status", "running")
+          .order("created_at", { ascending: false })
+          .limit(10);
+
+        // Find session for this conversation
+        const match = sessions?.find((s: any) => {
+          const m = s.metadata as Record<string, unknown>;
+          return m?.conversation_id === conversationId;
+        });
+        if (match) {
+          sessionId = match.id;
+          sessionMeta = (match.metadata as Record<string, unknown>) || {};
+        }
+      }
+
+      if (!sessionId && toolName !== "browser_stop") {
+        return jsonResp({
+          error: "No active browser session. Call browser_start first.",
+          markdown_content: "Error: No active browser session found. Please call browser_start first to create a session.",
+        }, 400);
+      }
+
+      const currentUrl = (sessionMeta.current_url as string) || null;
+
+      // ── browser_stop ──
+      if (toolName === "browser_stop") {
+        if (sessionId) {
+          await supabaseAdmin
+            .from("browser_sessions")
+            .update({ status: "stopped", stopped_at: new Date().toISOString() })
+            .eq("id", sessionId);
+        }
+        return jsonResp({
+          stopped: true,
+          markdown_content: "Browser session closed.",
+        });
+      }
+
+      // ── browser_navigate ──
+      if (toolName === "browser_navigate") {
+        const targetUrl = (input.url as string) || "";
+        if (!targetUrl) return jsonResp({ error: "url is required" }, 400);
+
+        const result = await executeBrowserlessAction(bl, "navigate", { url: targetUrl }, null);
+        const data = result.data as Record<string, unknown> || {};
+
+        // Update session URL
+        await supabaseAdmin.from("browser_sessions").update({
+          metadata: { ...sessionMeta, current_url: data.url || targetUrl, last_action_at: new Date().toISOString() }
+        }).eq("id", sessionId);
+
+        return jsonResp({
+          ...data,
+          success: result.success,
+          markdown_content: result.success
+            ? `Navigated to ${data.url || targetUrl}. Page title: "${data.title || "unknown"}".`
+            : `Failed to navigate: ${result.error}`,
+        });
+      }
+
+      // ── browser_click ──
+      if (toolName === "browser_click") {
+        const result = await executeBrowserlessAction(bl, "click", input, currentUrl);
+        const data = result.data as Record<string, unknown> || {};
+
+        await supabaseAdmin.from("browser_sessions").update({
+          metadata: { ...sessionMeta, current_url: data.url || result.final_url || currentUrl, last_action_at: new Date().toISOString() }
+        }).eq("id", sessionId);
+
+        return jsonResp({
+          ...data,
+          success: result.success,
+          markdown_content: result.success
+            ? `Clicked "${input.selector}". Page is now at: ${data.url || result.final_url || currentUrl}.`
+            : `Failed to click: ${result.error}`,
+        });
+      }
+
+      // ── browser_type ──
+      if (toolName === "browser_type") {
+        const result = await executeBrowserlessAction(bl, "type", input, currentUrl);
+        const data = result.data as Record<string, unknown> || {};
+
+        return jsonResp({
+          ...data,
+          success: result.success,
+          markdown_content: result.success
+            ? `Typed text into "${input.selector}".`
+            : `Failed to type: ${result.error}`,
+        });
+      }
+
+      // ── browser_screenshot ──
+      if (toolName === "browser_screenshot") {
+        const result = await executeBrowserlessAction(bl, "screenshot", input, currentUrl);
+        const data = result.data as Record<string, unknown> || {};
+
+        return jsonResp({
+          ...data,
+          success: result.success,
+          has_screenshot: !!(data.screenshot),
+          markdown_content: result.success
+            ? `Screenshot taken of ${currentUrl || "current page"}. Title: "${data.title || ""}".`
+            : `Failed to take screenshot: ${result.error}`,
+        });
+      }
+
+      // ── browser_extract ──
+      if (toolName === "browser_extract") {
+        const selector = (input.selector as string) || "body";
+        const result = await executeBrowserlessAction(bl, "extract", { selector }, currentUrl);
+        const data = result.data as Record<string, unknown> || {};
+        const content = ((data.content as string) || "").substring(0, 8000);
+
+        return jsonResp({
+          content,
+          title: data.title || "",
+          url: data.url || currentUrl || "",
+          success: result.success,
+          markdown_content: result.success
+            ? `# ${data.title || currentUrl}\n\nExtracted from: ${data.url || currentUrl}\n\n${content || "(no content)"}`
+            : `Failed to extract: ${result.error}`,
+        });
+      }
+
+      // ── browser_scroll ──
+      if (toolName === "browser_scroll") {
+        const result = await executeBrowserlessAction(bl, "scroll", input, currentUrl);
+        const data = result.data as Record<string, unknown> || {};
+
+        return jsonResp({
+          ...data,
+          success: result.success,
+          markdown_content: result.success
+            ? `Scrolled ${input.direction || "down"} ${input.amount || 500}px.`
+            : `Failed to scroll: ${result.error}`,
+        });
+      }
+
+      // ── browser_select ──
+      if (toolName === "browser_select") {
+        const result = await executeBrowserlessAction(bl, "select", input, currentUrl);
+        const data = result.data as Record<string, unknown> || {};
+
+        return jsonResp({
+          ...data,
+          success: result.success,
+          markdown_content: result.success
+            ? `Selected "${input.value}" in "${input.selector}".`
+            : `Failed to select: ${result.error}`,
+        });
+      }
+
+      // ── browser_wait_for_user ──
+      if (toolName === "browser_wait_for_user") {
+        const liveUrl = `${bl.baseUrl}/live?token=${bl.token}`;
+        return jsonResp({
+          waiting: true,
+          instruction: input.instruction,
+          live_url: liveUrl,
+          session_id: sessionId,
+          markdown_content: `Waiting for user action: ${input.instruction}\n\nPlease use the live browser view to complete this step, then approve to continue.`,
+        });
+      }
+
+      return jsonResp({ error: `Unknown tool: ${toolName}`, markdown_content: `Unknown browser tool: ${toolName}` }, 400);
+    } catch (err) {
+      return jsonResp({
+        error: `Agent action failed: ${err instanceof Error ? err.message : String(err)}`,
+        markdown_content: `Browser action failed: ${err instanceof Error ? err.message : String(err)}`,
+      }, 502);
+    }
+  }
+
   // ── Everything below requires auth ──
 
   const authHeader = req.headers.get("Authorization");

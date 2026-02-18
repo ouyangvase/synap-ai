@@ -224,75 +224,102 @@ serve(async (req) => {
           };
           await supabase.from("messages").insert(assistantMsg);
 
-          // Handle tool calls
+          // Handle tool calls - AGENTIC LOOP: keep calling tools until AI gives a text response
           if (toolCallsList.length > 0) {
-            const toolResultMessages: any[] = [];
+            let loopMessages = [...llmMessages];
+            let currentToolCalls = toolCallsList;
+            let currentContent = fullContent;
+            const MAX_AGENT_LOOPS = 8; // safety limit
 
-            for (const tc of toolCallsList) {
-              const tool = tools.find((t) => t.name === tc.function.name);
-              if (!tool) continue;
+            for (let agentLoop = 0; agentLoop < MAX_AGENT_LOOPS; agentLoop++) {
+              const toolResultMessages: any[] = [];
+              let hasApprovalPending = false;
 
-              let parsedArgs: Record<string, unknown> = {};
-              try { parsedArgs = JSON.parse(tc.function.arguments); } catch {}
+              for (const tc of currentToolCalls) {
+                const tool = tools.find((t) => t.name === tc.function.name);
+                if (!tool) continue;
 
-              // Create tool run
-              const { data: toolRun } = await supabase
-                .from("tool_runs")
-                .insert({
-                  conversation_id,
-                  user_id: user.id,
-                  tool_id: tool.id,
-                  tool_call_id: tc.id,
-                  status: tool.requires_approval ? "pending" : "running",
-                  input: parsedArgs,
-                  started_at: tool.requires_approval ? null : new Date().toISOString(),
-                })
-                .select()
-                .single();
+                let parsedArgs: Record<string, unknown> = {};
+                try { parsedArgs = JSON.parse(tc.function.arguments); } catch {}
 
-              if (tool.requires_approval && toolRun) {
-                // Create approval request
-                await supabase.from("tool_approvals").insert({
-                  tool_run_id: toolRun.id,
-                  status: "pending",
-                });
-                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "approval_required", tool_run_id: toolRun.id, tool_name: tool.name })}\n\n`));
-              } else if (toolRun) {
-                // Execute immediately
-                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "tool_call", tool_run_id: toolRun.id, tool_name: tool.name })}\n\n`));
-                await executeToolRun(supabase, toolRun.id, tool, parsedArgs, user.id, conversation_id);
-                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "tool_result", tool_run_id: toolRun.id })}\n\n`));
-
-                // Get the tool result from DB for follow-up LLM call
-                const { data: completedRun } = await supabase
+                // Create tool run
+                const { data: toolRun } = await supabase
                   .from("tool_runs")
-                  .select("output, status, tool_call_id")
-                  .eq("id", toolRun.id)
+                  .insert({
+                    conversation_id,
+                    user_id: user.id,
+                    tool_id: tool.id,
+                    tool_call_id: tc.id,
+                    status: tool.requires_approval ? "pending" : "running",
+                    input: parsedArgs,
+                    started_at: tool.requires_approval ? null : new Date().toISOString(),
+                  })
+                  .select()
                   .single();
 
-                if (completedRun) {
-                  const resultContent = completedRun.output?.markdown_content || JSON.stringify(completedRun.output || {});
-                  toolResultMessages.push({
-                    role: "tool",
-                    content: resultContent,
-                    tool_call_id: completedRun.tool_call_id,
+                if (tool.requires_approval && toolRun) {
+                  await supabase.from("tool_approvals").insert({
+                    tool_run_id: toolRun.id,
+                    status: "pending",
                   });
+                  controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "approval_required", tool_run_id: toolRun.id, tool_name: tool.name })}\n\n`));
+                  hasApprovalPending = true;
+                } else if (toolRun) {
+                  controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "tool_call", tool_run_id: toolRun.id, tool_name: tool.name })}\n\n`));
+                  await executeToolRun(supabase, toolRun.id, tool, parsedArgs, user.id, conversation_id);
+                  controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "tool_result", tool_run_id: toolRun.id })}\n\n`));
+
+                  const { data: completedRun } = await supabase
+                    .from("tool_runs")
+                    .select("output, status, tool_call_id")
+                    .eq("id", toolRun.id)
+                    .single();
+
+                  if (completedRun) {
+                    const resultContent = completedRun.output?.markdown_content || JSON.stringify(completedRun.output || {});
+                    toolResultMessages.push({
+                      role: "tool",
+                      content: typeof resultContent === 'string' ? resultContent.substring(0, 10000) : JSON.stringify(resultContent).substring(0, 10000),
+                      tool_call_id: completedRun.tool_call_id,
+                    });
+                  }
                 }
               }
-            }
 
-            // --- Follow-up LLM call: send tool results back to get a summary ---
-            if (toolResultMessages.length > 0) {
-              // Build messages: original context + assistant tool_calls + tool results
-              const followUpMessages = [
-                ...llmMessages,
-                { role: "assistant", content: fullContent || null, tool_calls: toolCallsList.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.function.name, arguments: tc.function.arguments } })) },
+              // If approval is pending, stop the loop
+              if (hasApprovalPending) break;
+
+              // If no tool results, stop
+              if (toolResultMessages.length === 0) break;
+
+              // Build follow-up messages for next LLM call
+              loopMessages = [
+                ...loopMessages,
+                {
+                  role: "assistant",
+                  content: currentContent || null,
+                  tool_calls: currentToolCalls.map((tc) => ({
+                    id: tc.id, type: "function",
+                    function: { name: tc.function.name, arguments: tc.function.arguments }
+                  }))
+                },
                 ...toolResultMessages,
               ];
 
+              // Save tool result messages to DB
+              for (const trm of toolResultMessages) {
+                await supabase.from("messages").insert({
+                  conversation_id,
+                  user_id: user.id,
+                  role: "tool",
+                  content: trm.content,
+                  tool_call_id: trm.tool_call_id,
+                });
+              }
+
               const followUpBody: any = {
                 model,
-                messages: followUpMessages,
+                messages: loopMessages,
                 stream: true,
               };
               if (llmTools.length > 0) followUpBody.tools = llmTools;
@@ -309,47 +336,78 @@ serve(async (req) => {
                 }
               );
 
-              if (followUpResp.ok) {
-                const followReader = followUpResp.body!.getReader();
-                const followDecoder = new TextDecoder();
-                let followBuffer = "";
-                let followContent = "";
+              if (!followUpResp.ok) break;
 
-                while (true) {
-                  const { done: fDone, value: fValue } = await followReader.read();
-                  if (fDone) break;
-                  followBuffer += followDecoder.decode(fValue, { stream: true });
+              // Parse follow-up response
+              const followReader = followUpResp.body!.getReader();
+              const followDecoder = new TextDecoder();
+              let followBuffer = "";
+              let followContent = "";
+              let followToolCalls: Record<number, { id: string; function: { name: string; arguments: string } }> = {};
+              let followFinish = "";
 
-                  let fIdx: number;
-                  while ((fIdx = followBuffer.indexOf("\n")) !== -1) {
-                    let fLine = followBuffer.slice(0, fIdx);
-                    followBuffer = followBuffer.slice(fIdx + 1);
-                    if (fLine.endsWith("\r")) fLine = fLine.slice(0, -1);
-                    if (!fLine.startsWith("data: ") || fLine.trim() === "") continue;
-                    const fJson = fLine.slice(6).trim();
-                    if (fJson === "[DONE]") continue;
+              while (true) {
+                const { done: fDone, value: fValue } = await followReader.read();
+                if (fDone) break;
+                followBuffer += followDecoder.decode(fValue, { stream: true });
 
-                    try {
-                      const fParsed = JSON.parse(fJson);
-                      const fChoice = fParsed.choices?.[0];
-                      if (fChoice?.delta?.content) {
-                        followContent += fChoice.delta.content;
-                        controller.enqueue(encoder.encode(`data: ${JSON.stringify(fParsed)}\n\n`));
+                let fIdx: number;
+                while ((fIdx = followBuffer.indexOf("\n")) !== -1) {
+                  let fLine = followBuffer.slice(0, fIdx);
+                  followBuffer = followBuffer.slice(fIdx + 1);
+                  if (fLine.endsWith("\r")) fLine = fLine.slice(0, -1);
+                  if (!fLine.startsWith("data: ") || fLine.trim() === "") continue;
+                  const fJson = fLine.slice(6).trim();
+                  if (fJson === "[DONE]") continue;
+
+                  try {
+                    const fParsed = JSON.parse(fJson);
+                    const fChoice = fParsed.choices?.[0];
+                    if (!fChoice) continue;
+                    if (fChoice.finish_reason) followFinish = fChoice.finish_reason;
+                    const fDelta = fChoice.delta;
+                    if (!fDelta) continue;
+
+                    if (fDelta.content) {
+                      followContent += fDelta.content;
+                      controller.enqueue(encoder.encode(`data: ${JSON.stringify(fParsed)}\n\n`));
+                    }
+                    if (fDelta.tool_calls) {
+                      for (const tc of fDelta.tool_calls) {
+                        const idx = tc.index ?? 0;
+                        if (!followToolCalls[idx]) {
+                          followToolCalls[idx] = { id: tc.id || "", function: { name: "", arguments: "" } };
+                        }
+                        if (tc.id) followToolCalls[idx].id = tc.id;
+                        if (tc.function?.name) followToolCalls[idx].function.name += tc.function.name;
+                        if (tc.function?.arguments) followToolCalls[idx].function.arguments += tc.function.arguments;
                       }
-                    } catch {}
-                  }
-                }
-
-                // Save follow-up assistant message
-                if (followContent) {
-                  await supabase.from("messages").insert({
-                    conversation_id,
-                    user_id: user.id,
-                    role: "assistant",
-                    content: followContent,
-                  });
+                    }
+                  } catch {}
                 }
               }
+
+              // Save follow-up assistant message
+              const followToolCallsList = Object.values(followToolCalls);
+              if (followContent || followToolCallsList.length > 0) {
+                await supabase.from("messages").insert({
+                  conversation_id,
+                  user_id: user.id,
+                  role: "assistant",
+                  content: followContent || null,
+                  tool_calls: followToolCallsList.length > 0 ? followToolCallsList : null,
+                });
+              }
+
+              // If the follow-up also has tool calls, continue the loop
+              if (followToolCallsList.length > 0) {
+                currentToolCalls = followToolCallsList;
+                currentContent = followContent;
+                continue; // next iteration of agent loop
+              }
+
+              // Otherwise, we're done - AI gave a text response
+              break;
             }
           }
 
