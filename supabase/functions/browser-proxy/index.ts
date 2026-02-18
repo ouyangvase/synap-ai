@@ -146,6 +146,94 @@ Deno.serve(async (req) => {
     }
   }
 
+  // ──────────────────────────────────────────────
+  // POST /browse — Lightweight page content extraction for AI tool calls.
+  // Called by the chat edge function (service-to-service), no user auth needed.
+  // Accepts: { input: { url: "..." }, meta: {...} }
+  // Returns: { content, title, url }
+  // ──────────────────────────────────────────────
+  if (path === "/browse" && req.method === "POST") {
+    if (!rawUrl) {
+      return jsonResp({ error: "Browser service not configured" }, 503);
+    }
+    let bl: ReturnType<typeof parseBrowserlessUrl>;
+    try {
+      bl = parseBrowserlessUrl(rawUrl);
+    } catch {
+      return jsonResp({ error: "Invalid BROWSER_SERVICE_URL" }, 500);
+    }
+
+    let body: Record<string, unknown> = {};
+    try { body = await req.json(); } catch {}
+    const input = (body.input as Record<string, unknown>) || body;
+    const targetUrl = (input.url as string) || "";
+    if (!targetUrl) {
+      return jsonResp({ error: "url is required in input" }, 400);
+    }
+
+    try {
+      // Use Browserless /function to navigate + extract text
+      const script = `export default async function ({ page }) {
+        await page.goto(${JSON.stringify(targetUrl)}, { waitUntil: "networkidle2", timeout: 25000 });
+        const title = await page.title();
+        const finalUrl = page.url();
+        const content = await page.evaluate(() => {
+          // Remove script/style/nav/header/footer for cleaner text
+          const remove = document.querySelectorAll("script, style, nav, footer, header, aside, [role=navigation], [role=banner]");
+          remove.forEach(el => el.remove());
+          return document.body ? document.body.innerText.substring(0, 12000) : "";
+        });
+        return {
+          data: { content, title, url: finalUrl },
+          type: "application/json",
+        };
+      }`;
+
+      const resp = await fetchWithTimeout(
+        `${bl.baseUrl}/function?token=${bl.token}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/javascript" },
+          body: script,
+          timeout: 30_000,
+        },
+      );
+
+      if (!resp.ok) {
+        const errText = await resp.text();
+        return jsonResp({
+          error: `Browser fetch failed (${resp.status})`,
+          detail: errText.slice(0, 500),
+        }, 502);
+      }
+
+      const contentType = resp.headers.get("content-type") || "";
+      if (contentType.includes("application/json")) {
+        const result = await resp.json();
+        const data = result.data || result.result || result;
+        return jsonResp({
+          content: data.content || "",
+          title: data.title || "",
+          url: data.url || targetUrl,
+          markdown_content: `# ${data.title || targetUrl}\n\nSource: ${data.url || targetUrl}\n\n${data.content || "(no content extracted)"}`,
+        });
+      }
+
+      const text = await resp.text();
+      return jsonResp({
+        content: text.substring(0, 12000),
+        title: targetUrl,
+        url: targetUrl,
+        markdown_content: `# ${targetUrl}\n\n${text.substring(0, 12000)}`,
+      });
+    } catch (err) {
+      return jsonResp({
+        error: `Browse failed: ${err instanceof Error ? err.message : String(err)}`,
+        url: targetUrl,
+      }, 502);
+    }
+  }
+
   // ── Everything below requires auth ──
 
   const authHeader = req.headers.get("Authorization");

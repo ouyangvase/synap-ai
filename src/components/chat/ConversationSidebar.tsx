@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { Button } from "@/components/ui/button";
-import { Plus, MessageSquare, LogOut, X, Bot, Monitor, Calendar } from "lucide-react";
+import { Plus, MessageSquare, LogOut, X, Bot, Monitor, Calendar, Trash2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { formatDistanceToNow } from "date-fns";
@@ -34,6 +34,19 @@ export function ConversationSidebar({ activeId, onSelect, onNew, open, onClose }
       .select("id, title, created_at, updated_at")
       .order("updated_at", { ascending: false });
     if (data) setConversations(data);
+  };
+
+  const handleDelete = async (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    // Delete messages first (FK constraint), then conversation
+    await supabase.from("messages").delete().eq("conversation_id", id);
+    await supabase.from("tool_runs").delete().eq("conversation_id", id);
+    await supabase.from("conversations").delete().eq("id", id);
+    // If this was the active conversation, navigate away
+    if (activeId === id) {
+      navigate("/");
+    }
+    fetchConversations();
   };
 
   useEffect(() => {
@@ -91,7 +104,7 @@ export function ConversationSidebar({ activeId, onSelect, onNew, open, onClose }
             key={c.id}
             onClick={() => onSelect(c.id)}
             className={cn(
-              "w-full text-left px-3 py-2.5 rounded-md text-sm transition-colors group",
+              "w-full text-left px-3 py-2.5 rounded-md text-sm transition-colors group relative",
               activeId === c.id
                 ? "bg-sidebar-accent text-sidebar-accent-foreground"
                 : "text-sidebar-foreground hover:bg-sidebar-accent/50"
@@ -99,11 +112,18 @@ export function ConversationSidebar({ activeId, onSelect, onNew, open, onClose }
           >
             <div className="flex items-center gap-2">
               <MessageSquare className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
-              <span className="truncate">{c.title}</span>
+              <span className="truncate pr-6">{c.title}</span>
             </div>
             <p className="text-xs text-muted-foreground mt-0.5 ml-5.5">
               {formatDistanceToNow(new Date(c.updated_at), { addSuffix: true })}
             </p>
+            <span
+              role="button"
+              onClick={(e) => handleDelete(e, c.id)}
+              className="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-destructive/20 hover:text-destructive"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </span>
           </button>
         ))}
       </div>

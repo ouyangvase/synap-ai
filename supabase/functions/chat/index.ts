@@ -110,7 +110,6 @@ serve(async (req) => {
         name: t.name,
         description: t.description,
         parameters: t.input_schema || { type: "object", properties: {} },
-        strict: true,
       },
     }));
 
