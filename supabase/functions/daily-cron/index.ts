@@ -3,12 +3,17 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 /**
  * daily-cron — Supabase Edge Function
  *
- * Called by pg_cron (via net.http_post) or manually via POST.
+ * Called by pg_cron (via net.http_post) or manually via POST from the UI.
  * Iterates all active jobs, enforces daily idempotency (one run per job per day),
  * triggers the corresponding n8n webhook, and records the result.
  *
- * Auth: service-role key in Authorization header (no user JWT required).
+ * Auth: service-role key OR a valid user JWT in Authorization header.
  */
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+};
 
 interface Job {
   id: string;
@@ -37,21 +42,42 @@ function getTodayMYT(): string {
 }
 
 Deno.serve(async (req) => {
-  // ---------- Auth: validate service-role key ----------
-  const authHeader = req.headers.get("Authorization") ?? "";
-  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  // ---------- CORS ----------
+  if (req.method === "OPTIONS") {
+    return new Response(null, { headers: corsHeaders });
+  }
 
-  // Accept either "Bearer <service_role_key>" or just the raw key
+  // ---------- Auth: service-role key OR valid user JWT ----------
+  const authHeader = req.headers.get("Authorization") ?? "";
+  const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
+
   const token = authHeader.replace(/^Bearer\s+/i, "");
-  if (token !== serviceRoleKey) {
-    return new Response(JSON.stringify({ error: "Unauthorized — service role key required" }), {
+  let isAuthorized = false;
+
+  // Check if it's the service role key (from pg_cron or server-side)
+  if (token === serviceRoleKey) {
+    isAuthorized = true;
+  } else if (token) {
+    // Try to validate as a user JWT
+    const userClient = createClient(supabaseUrl, anonKey, {
+      global: { headers: { Authorization: authHeader } },
+    });
+    const { data: { user }, error: authError } = await userClient.auth.getUser();
+    if (!authError && user) {
+      isAuthorized = true;
+    }
+  }
+
+  if (!isAuthorized) {
+    return new Response(JSON.stringify({ error: "Unauthorized" }), {
       status: 401,
-      headers: { "Content-Type": "application/json" },
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
 
   // ---------- Supabase client (service role — bypasses RLS) ----------
-  const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const supabase = createClient(supabaseUrl, serviceRoleKey);
 
   // ---------- n8n webhook base ----------
@@ -59,7 +85,7 @@ Deno.serve(async (req) => {
   if (!n8nBase) {
     return new Response(JSON.stringify({ error: "N8N_WEBHOOK_BASE_URL is not configured" }), {
       status: 500,
-      headers: { "Content-Type": "application/json" },
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
 
@@ -79,7 +105,7 @@ Deno.serve(async (req) => {
 
     if (!jobs || jobs.length === 0) {
       return new Response(JSON.stringify({ message: "No active jobs found", date: today, results: [] }), {
-        headers: { "Content-Type": "application/json" },
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
@@ -239,14 +265,14 @@ Deno.serve(async (req) => {
     };
 
     return new Response(JSON.stringify(summary, null, 2), {
-      headers: { "Content-Type": "application/json" },
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (err: unknown) {
     const errorMessage = err instanceof Error ? err.message : String(err);
     console.error("daily-cron fatal error:", errorMessage);
     return new Response(JSON.stringify({ error: errorMessage, results }), {
       status: 500,
-      headers: { "Content-Type": "application/json" },
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
 });
