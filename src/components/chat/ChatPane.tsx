@@ -1,9 +1,9 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Send, Bot, User, Plus, Monitor, X } from "lucide-react";
+import { Send, Bot, Plus, Monitor, X, Image as ImageIcon } from "lucide-react";
 import { ToolCard } from "./ToolCard";
 import { MessageBubble } from "./MessageBubble";
 import { useToast } from "@/hooks/use-toast";
@@ -45,8 +45,8 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingContent, setStreamingContent] = useState("");
-  const [browserLiveUrl, setBrowserLiveUrl] = useState<string | null>(null);
-  const [browserPanelOpen, setBrowserPanelOpen] = useState(false);
+  const [latestScreenshot, setLatestScreenshot] = useState<string | null>(null);
+  const [screenshotPanelOpen, setScreenshotPanelOpen] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = useCallback(() => {
@@ -76,7 +76,7 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
   }, [conversationId]);
 
   useEffect(() => {
-    if (!conversationId) { setMessages([]); setToolRuns([]); return; }
+    if (!conversationId) { setMessages([]); setToolRuns([]); setLatestScreenshot(null); return; }
     fetchMessages();
     fetchToolRuns();
 
@@ -104,20 +104,16 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
 
   useEffect(() => { scrollToBottom(); }, [messages, streamingContent, scrollToBottom]);
 
-  // Detect live browser URL from tool runs
+  // Detect screenshots from browser_do tool runs
   useEffect(() => {
     for (const run of toolRuns) {
       const output = run.output as Record<string, unknown> | null;
-      if (output?.live_url && typeof output.live_url === "string") {
-        if (output.live_url !== browserLiveUrl) {
-          setBrowserLiveUrl(output.live_url as string);
-          setBrowserPanelOpen(true);
+      if (output?.screenshot && typeof output.screenshot === "string") {
+        const screenshotData = output.screenshot as string;
+        if (screenshotData.length > 100) {
+          setLatestScreenshot(screenshotData);
+          setScreenshotPanelOpen(true);
         }
-      }
-      // Detect browser_stop
-      if (output?.stopped === true) {
-        setBrowserLiveUrl(null);
-        setBrowserPanelOpen(false);
       }
     }
   }, [toolRuns]);
@@ -237,18 +233,18 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
   return (
     <div className="flex-1 flex min-w-0">
       {/* Chat column */}
-      <div className={`flex flex-col min-w-0 ${browserPanelOpen ? "w-1/2" : "flex-1"}`}>
-        {/* Browser panel toggle button */}
-        {browserLiveUrl && !browserPanelOpen && (
+      <div className={`flex flex-col min-w-0 ${screenshotPanelOpen && latestScreenshot ? "w-1/2" : "flex-1"}`}>
+        {/* Screenshot panel toggle button */}
+        {latestScreenshot && !screenshotPanelOpen && (
           <div className="p-2 border-b border-border bg-primary/5">
             <Button
               variant="outline"
               size="sm"
-              onClick={() => setBrowserPanelOpen(true)}
+              onClick={() => setScreenshotPanelOpen(true)}
               className="gap-2 text-xs"
             >
               <Monitor className="w-3.5 h-3.5" />
-              Show Live Browser
+              Show Browser Screenshot
             </Button>
           </div>
         )}
@@ -321,30 +317,31 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
       </div>
     </div>
 
-      {/* Live Browser Panel */}
-      {browserPanelOpen && browserLiveUrl && (
+      {/* Browser Screenshot Panel */}
+      {screenshotPanelOpen && latestScreenshot && (
         <div className="w-1/2 flex flex-col border-l border-border bg-background">
           <div className="flex items-center justify-between p-2 border-b border-border bg-muted/50">
             <div className="flex items-center gap-2">
-              <Monitor className="w-4 h-4 text-primary" />
-              <span className="text-xs font-medium">Live Browser</span>
-              <span className="text-xs text-muted-foreground">Watch the agent work</span>
+              <ImageIcon className="w-4 h-4 text-primary" />
+              <span className="text-xs font-medium">Browser View</span>
+              <span className="text-xs text-muted-foreground">Latest screenshot from agent</span>
             </div>
             <Button
               variant="ghost"
               size="icon"
               className="h-6 w-6"
-              onClick={() => setBrowserPanelOpen(false)}
+              onClick={() => setScreenshotPanelOpen(false)}
             >
               <X className="w-3.5 h-3.5" />
             </Button>
           </div>
-          <iframe
-            src={browserLiveUrl}
-            className="flex-1 w-full"
-            title="Live Browser View"
-            sandbox="allow-same-origin allow-scripts allow-popups allow-forms"
-          />
+          <div className="flex-1 overflow-auto p-2 flex items-start justify-center bg-muted/20">
+            <img
+              src={`data:image/png;base64,${latestScreenshot}`}
+              alt="Browser screenshot"
+              className="max-w-full rounded border border-border shadow-sm"
+            />
+          </div>
         </div>
       )}
     </div>
