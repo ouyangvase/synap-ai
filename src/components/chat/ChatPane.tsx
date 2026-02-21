@@ -3,7 +3,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Send, Bot, Plus, Monitor, X, Image as ImageIcon } from "lucide-react";
+import { Send, Bot, Plus, Monitor, X, Image as ImageIcon, Globe } from "lucide-react";
 import { ToolCard } from "./ToolCard";
 import { MessageBubble } from "./MessageBubble";
 import { useToast } from "@/hooks/use-toast";
@@ -46,7 +46,9 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingContent, setStreamingContent] = useState("");
   const [latestScreenshot, setLatestScreenshot] = useState<string | null>(null);
+  const [screenshots, setScreenshots] = useState<{ data: string; url: string; title: string; time: string }[]>([]);
   const [screenshotPanelOpen, setScreenshotPanelOpen] = useState(false);
+  const [browserUrl, setBrowserUrl] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = useCallback(() => {
@@ -76,7 +78,7 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
   }, [conversationId]);
 
   useEffect(() => {
-    if (!conversationId) { setMessages([]); setToolRuns([]); setLatestScreenshot(null); return; }
+    if (!conversationId) { setMessages([]); setToolRuns([]); setLatestScreenshot(null); setScreenshots([]); setBrowserUrl(null); return; }
     fetchMessages();
     fetchToolRuns();
 
@@ -104,18 +106,39 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
 
   useEffect(() => { scrollToBottom(); }, [messages, streamingContent, scrollToBottom]);
 
-  // Detect screenshots from browser_do tool runs
+  // Detect screenshots and browser URL from tool runs
   useEffect(() => {
+    const newScreenshots: { data: string; url: string; title: string; time: string }[] = [];
+    let latestUrl: string | null = null;
+
     for (const run of toolRuns) {
       const output = run.output as Record<string, unknown> | null;
-      if (output?.screenshot && typeof output.screenshot === "string") {
+      if (!output) continue;
+
+      // Track browser URL from any browser tool output
+      if (output.url && typeof output.url === "string") {
+        latestUrl = output.url as string;
+      }
+
+      if (output.screenshot && typeof output.screenshot === "string") {
         const screenshotData = output.screenshot as string;
         if (screenshotData.length > 100) {
-          setLatestScreenshot(screenshotData);
-          setScreenshotPanelOpen(true);
+          newScreenshots.push({
+            data: screenshotData,
+            url: (output.url as string) || "",
+            title: (output.title as string) || "",
+            time: run.completed_at || run.created_at,
+          });
         }
       }
     }
+
+    if (newScreenshots.length > 0) {
+      setScreenshots(newScreenshots);
+      setLatestScreenshot(newScreenshots[newScreenshots.length - 1].data);
+      setScreenshotPanelOpen(true);
+    }
+    if (latestUrl) setBrowserUrl(latestUrl);
   }, [toolRuns]);
 
   const handleSend = async () => {
@@ -238,8 +261,27 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
     <div className="flex-1 flex min-w-0">
       {/* Chat column */}
       <div className={`flex flex-col min-w-0 ${screenshotPanelOpen && latestScreenshot ? "w-1/2" : "flex-1"}`}>
+        {/* Browser state indicator */}
+        {browserUrl && (
+          <div className="px-4 py-1.5 border-b border-border glass-subtle flex items-center gap-2">
+            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+            <Globe className="w-3 h-3 text-muted-foreground" />
+            <span className="text-[11px] text-muted-foreground truncate flex-1">{browserUrl}</span>
+            {latestScreenshot && !screenshotPanelOpen && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setScreenshotPanelOpen(true)}
+                className="h-6 text-[10px] px-2 rounded-lg"
+              >
+                View
+              </Button>
+            )}
+          </div>
+        )}
+
         {/* Screenshot panel toggle button */}
-        {latestScreenshot && !screenshotPanelOpen && (
+        {latestScreenshot && !screenshotPanelOpen && !browserUrl && (
           <div className="p-2 border-b border-border glass-subtle">
             <Button
               variant="outline"
@@ -325,26 +367,62 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
       {screenshotPanelOpen && latestScreenshot && (
         <div className="w-1/2 flex flex-col border-l border-border bg-background">
           <div className="flex items-center justify-between p-2 border-b border-border glass-subtle">
-            <div className="flex items-center gap-2">
-              <ImageIcon className="w-4 h-4 text-primary" />
-              <span className="text-xs font-medium">Browser View</span>
-              <span className="text-xs text-muted-foreground">Latest screenshot from agent</span>
+            <div className="flex items-center gap-2 min-w-0">
+              <ImageIcon className="w-4 h-4 text-primary shrink-0" />
+              <span className="text-xs font-medium shrink-0">Browser View</span>
+              {screenshots.length > 0 && screenshots[screenshots.length - 1].url && (
+                <span className="text-[10px] text-muted-foreground truncate">
+                  {screenshots[screenshots.length - 1].url}
+                </span>
+              )}
             </div>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7 rounded-lg"
-              onClick={() => setScreenshotPanelOpen(false)}
-            >
-              <X className="w-3.5 h-3.5" />
-            </Button>
+            <div className="flex items-center gap-1 shrink-0">
+              {screenshots.length > 1 && (
+                <span className="text-[10px] text-muted-foreground">{screenshots.length} captures</span>
+              )}
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 rounded-lg"
+                onClick={() => setScreenshotPanelOpen(false)}
+              >
+                <X className="w-3.5 h-3.5" />
+              </Button>
+            </div>
           </div>
-          <div className="flex-1 overflow-auto p-3 flex items-start justify-center">
+          <div className="flex-1 overflow-auto p-3 space-y-3">
+            {/* Show latest screenshot large */}
             <img
               src={`data:image/png;base64,${latestScreenshot}`}
               alt="Browser screenshot"
               className="max-w-full rounded-xl border border-border elevation-1"
             />
+            {/* Show older screenshots as thumbnails */}
+            {screenshots.length > 1 && (
+              <div className="space-y-1">
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground">History</p>
+                <div className="flex gap-2 flex-wrap">
+                  {screenshots.slice(0, -1).reverse().map((s, i) => (
+                    <button
+                      key={i}
+                      onClick={() => setLatestScreenshot(s.data)}
+                      className="group relative"
+                    >
+                      <img
+                        src={`data:image/png;base64,${s.data}`}
+                        alt={`Screenshot ${screenshots.length - 1 - i}`}
+                        className="w-24 h-16 object-cover rounded-lg border border-border opacity-70 group-hover:opacity-100 transition-opacity"
+                      />
+                      {s.url && (
+                        <span className="absolute bottom-0.5 left-0.5 right-0.5 text-[8px] text-white bg-black/60 rounded px-0.5 truncate">
+                          {new URL(s.url).pathname}
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

@@ -150,7 +150,7 @@ serve(async (req) => {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
-      throw new Error("LLM request failed");
+      throw new Error(`AI service error (HTTP ${llmResponse.status}). Please try again.`);
     }
 
     // Process stream: collect tool calls and stream text
@@ -229,7 +229,7 @@ serve(async (req) => {
             let loopMessages = [...llmMessages];
             let currentToolCalls = toolCallsList;
             let currentContent = fullContent;
-            const MAX_AGENT_LOOPS = 12; // autonomous agent needs more steps for complex tasks
+            const MAX_AGENT_LOOPS = 16; // autonomous agent needs more steps for complex tasks (initial + failure analysis + correction cycles)
 
             for (let agentLoop = 0; agentLoop < MAX_AGENT_LOOPS; agentLoop++) {
               const toolResultMessages: any[] = [];
@@ -328,7 +328,17 @@ serve(async (req) => {
                 }
               );
 
-              if (!followUpResp.ok) break;
+              if (!followUpResp.ok) {
+                const errStatus = followUpResp.status;
+                console.error("Follow-up LLM error:", errStatus);
+                // Don't break silently — surface error info
+                if (errStatus === 429) {
+                  controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "\n\n*Rate limited by AI provider — pausing. Please wait and retry.*" } }] })}\n\n`));
+                } else if (errStatus >= 500) {
+                  controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "\n\n*AI service temporarily unavailable. Please retry.*" } }] })}\n\n`));
+                }
+                break;
+              }
 
               // Parse follow-up response
               const followReader = followUpResp.body!.getReader();

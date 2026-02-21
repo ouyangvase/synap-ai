@@ -711,8 +711,22 @@ Deno.serve(async (req) => {
         const stepResults = (result.step_results as string[]) || [];
 
         let markdown = `# ${pageTitle || pageUrl}\n\nFinal URL: ${pageUrl}\n`;
+
+        // Detect failures in step results
+        const failedSteps = stepResults.filter((s: string) => s.startsWith("FAIL"));
+        const hasFailures = failedSteps.length > 0;
+
+        if (hasFailures) {
+          markdown += `\n## ⚠ FAILED STEPS (${failedSteps.length})\n`;
+          markdown += `The following steps failed. Use the DOM hints (AVAILABLE_INPUTS / AVAILABLE_BUTTONS) to construct corrected actions:\n\n`;
+          failedSteps.forEach((s: string, i: number) => {
+            markdown += `${i + 1}. ${s}\n`;
+          });
+          markdown += `\n**DO NOT ask the user for selectors.** Use the available elements listed above to retry with corrected parameters.\n`;
+        }
+
         if (stepResults.length > 0) {
-          markdown += `\nSteps completed:\n${stepResults.map((s: string, i: number) => `${i + 1}. ${s}`).join("\n")}\n`;
+          markdown += `\nAll steps:\n${stepResults.map((s: string, i: number) => `${i + 1}. ${s}`).join("\n")}\n`;
         }
         if (extractedContent) {
           markdown += `\nPage content:\n${extractedContent.substring(0, 8000)}`;
@@ -720,6 +734,8 @@ Deno.serve(async (req) => {
 
         return jsonResp({
           success: true,
+          has_failures: hasFailures,
+          failed_step_count: failedSteps.length,
           title: pageTitle,
           url: pageUrl,
           content: extractedContent.substring(0, 8000),
@@ -1531,14 +1547,21 @@ function buildCompositeScript(
             const labelText = ${JSON.stringify((step.label as string) || "")};
             const val = ${JSON.stringify((step.value as string) || "")};
             const filled = await helpers.fillByLabel(page, labelText, val);
-            stepResults.push(filled
-              ? "Filled input labeled \\"" + labelText + "\\""
-              : "WARN: no input found for label \\"" + labelText + "\\" — trying fallback");
-            if (!filled) {
+            if (filled) {
+              stepResults.push("Filled input labeled \\"" + labelText + "\\"");
+            } else {
               const fb = await helpers.fillFallback(page, labelText, val);
-              stepResults.push(fb ? "Fallback fill succeeded for \\"" + labelText + "\\"" : "FAIL: could not fill \\"" + labelText + "\\"");
+              if (fb) {
+                stepResults.push("Fallback fill succeeded for \\"" + labelText + "\\"");
+              } else {
+                const domHint = await helpers.getAvailableInputs(page);
+                stepResults.push("FAIL fill_by_label [" + labelText + "] | AVAILABLE_INPUTS: " + JSON.stringify(domHint));
+              }
             }
-          } catch(e) { stepResults.push("fill_by_label error: " + e.message); }
+          } catch(e) {
+            const domHint = await helpers.getAvailableInputs(page).catch(() => []);
+            stepResults.push("FAIL fill_by_label error: " + e.message + " | AVAILABLE_INPUTS: " + JSON.stringify(domHint));
+          }
         `);
         break;
 
@@ -1548,10 +1571,16 @@ function buildCompositeScript(
             const ph = ${JSON.stringify((step.placeholder as string) || "")};
             const val = ${JSON.stringify((step.value as string) || "")};
             const filled = await helpers.fillByPlaceholder(page, ph, val);
-            stepResults.push(filled
-              ? "Filled input with placeholder \\"" + ph + "\\""
-              : "FAIL: no input with placeholder \\"" + ph + "\\"");
-          } catch(e) { stepResults.push("fill_by_placeholder error: " + e.message); }
+            if (filled) {
+              stepResults.push("Filled input with placeholder \\"" + ph + "\\"");
+            } else {
+              const domHint = await helpers.getAvailableInputs(page);
+              stepResults.push("FAIL fill_by_placeholder [" + ph + "] | AVAILABLE_INPUTS: " + JSON.stringify(domHint));
+            }
+          } catch(e) {
+            const domHint = await helpers.getAvailableInputs(page).catch(() => []);
+            stepResults.push("FAIL fill_by_placeholder error: " + e.message + " | AVAILABLE_INPUTS: " + JSON.stringify(domHint));
+          }
         `);
         break;
 
@@ -1566,7 +1595,10 @@ function buildCompositeScript(
             await page.keyboard.press("Backspace");
             await page.type(sel, val, { delay: 30 });
             stepResults.push("Filled input [name=" + nameAttr + "]");
-          } catch(e) { stepResults.push("fill_by_name error: " + e.message); }
+          } catch(e) {
+            const domHint = await helpers.getAvailableInputs(page).catch(() => []);
+            stepResults.push("FAIL fill_by_name [name=" + ${JSON.stringify((step.name as string) || "")} + "] " + e.message + " | AVAILABLE_INPUTS: " + JSON.stringify(domHint));
+          }
         `);
         break;
 
@@ -1581,7 +1613,10 @@ function buildCompositeScript(
             await page.keyboard.press("Backspace");
             await page.type(sel, val, { delay: 30 });
             stepResults.push("Filled input[type=" + inputType + "]");
-          } catch(e) { stepResults.push("fill_by_type error: " + e.message); }
+          } catch(e) {
+            const domHint = await helpers.getAvailableInputs(page).catch(() => []);
+            stepResults.push("FAIL fill_by_type [type=" + ${JSON.stringify((step.type as string) || "text")} + "] " + e.message + " | AVAILABLE_INPUTS: " + JSON.stringify(domHint));
+          }
         `);
         break;
 
@@ -1597,9 +1632,13 @@ function buildCompositeScript(
               await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 8000 }).catch(() => {});
               stepResults.push("Clicked element with text \\"" + txt + "\\"");
             } else {
-              stepResults.push("FAIL: no clickable element with text \\"" + txt + "\\"");
+              const domHint = await helpers.getAvailableButtons(page);
+              stepResults.push("FAIL click_by_text [" + txt + "] | AVAILABLE_BUTTONS: " + JSON.stringify(domHint));
             }
-          } catch(e) { stepResults.push("click_by_text error: " + e.message); }
+          } catch(e) {
+            const domHint = await helpers.getAvailableButtons(page).catch(() => []);
+            stepResults.push("FAIL click_by_text error: " + e.message + " | AVAILABLE_BUTTONS: " + JSON.stringify(domHint));
+          }
         `);
         break;
 
@@ -1614,9 +1653,13 @@ function buildCompositeScript(
               await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 8000 }).catch(() => {});
               stepResults.push("Clicked " + role + " \\"" + name + "\\"");
             } else {
-              stepResults.push("FAIL: no " + role + " named \\"" + name + "\\"");
+              const domHint = await helpers.getAvailableButtons(page);
+              stepResults.push("FAIL click_by_role [" + role + " name=" + name + "] | AVAILABLE_BUTTONS: " + JSON.stringify(domHint));
             }
-          } catch(e) { stepResults.push("click_by_role error: " + e.message); }
+          } catch(e) {
+            const domHint = await helpers.getAvailableButtons(page).catch(() => []);
+            stepResults.push("FAIL click_by_role error: " + e.message + " | AVAILABLE_BUTTONS: " + JSON.stringify(domHint));
+          }
         `);
         break;
 
@@ -1630,9 +1673,13 @@ function buildCompositeScript(
               await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 8000 }).catch(() => {});
               stepResults.push("Clicked best match for intent \\"" + intent + "\\"");
             } else {
-              stepResults.push("FAIL: no match for intent \\"" + intent + "\\"");
+              const domHint = await helpers.getAvailableButtons(page);
+              stepResults.push("FAIL click_best_match [" + intent + "] | AVAILABLE_BUTTONS: " + JSON.stringify(domHint));
             }
-          } catch(e) { stepResults.push("click_best_match error: " + e.message); }
+          } catch(e) {
+            const domHint = await helpers.getAvailableButtons(page).catch(() => []);
+            stepResults.push("FAIL click_best_match error: " + e.message + " | AVAILABLE_BUTTONS: " + JSON.stringify(domHint));
+          }
         `);
         break;
 
@@ -2078,6 +2125,58 @@ function buildCompositeScript(
 
         return { success: emailFilled && passFilled && clicked, steps };
       },
+
+      // Get available inputs on the page for DOM hints (helps LLM self-correct)
+      async getAvailableInputs(page) {
+        try {
+          return await page.evaluate(() => {
+            const inputs = document.querySelectorAll('input, textarea, select');
+            const results = [];
+            for (const inp of inputs) {
+              if (inp.type === 'hidden') continue;
+              if (inp.offsetParent === null && inp.type !== 'password') continue;
+              const info = { tag: inp.tagName };
+              if (inp.name) info.name = inp.name;
+              if (inp.type) info.type = inp.type;
+              if (inp.placeholder) info.placeholder = inp.placeholder;
+              if (inp.id) info.id = inp.id;
+              const label = inp.getAttribute('aria-label');
+              if (label) info.ariaLabel = label;
+              if (inp.id) {
+                const lbl = document.querySelector('label[for="' + inp.id + '"]');
+                if (lbl) info.label = lbl.textContent.trim().substring(0, 50);
+              }
+              results.push(info);
+              if (results.length >= 15) break;
+            }
+            return results;
+          });
+        } catch { return []; }
+      },
+
+      // Get available clickable elements for DOM hints (helps LLM self-correct)
+      async getAvailableButtons(page) {
+        try {
+          return await page.evaluate(() => {
+            const els = document.querySelectorAll('button, a, [role=button], input[type=submit], input[type=button]');
+            const results = [];
+            for (const el of els) {
+              if (el.offsetParent === null) continue;
+              const text = (el.textContent || el.value || '').trim().substring(0, 60);
+              if (!text) continue;
+              const info = { tag: el.tagName, text };
+              if (el.getAttribute('role')) info.role = el.getAttribute('role');
+              if (el.getAttribute('aria-label')) info.ariaLabel = el.getAttribute('aria-label');
+              if (el.href) info.href = el.href.substring(0, 100);
+              if (el.type) info.type = el.type;
+              results.push(info);
+              if (results.length >= 15) break;
+            }
+            return results;
+          });
+        } catch { return []; }
+      },
+
     };
 
     // ═══ Main execution ═══
@@ -2131,13 +2230,11 @@ function buildCompositeScript(
       } catch {}
     }
 
-    // Take screenshot if requested
+    // Always take a final screenshot for visual feedback
     let screenshot = null;
-    if (takeScreenshot) {
-      try {
-        screenshot = await page.screenshot({ encoding: "base64", fullPage: false });
-      } catch {}
-    }
+    try {
+      screenshot = await page.screenshot({ encoding: "base64", fullPage: false });
+    } catch {}
 
     const title = await page.title();
     const finalUrl = page.url();

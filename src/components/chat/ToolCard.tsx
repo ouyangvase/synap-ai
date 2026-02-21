@@ -47,6 +47,17 @@ const statusConfig: Record<string, { icon: React.ElementType; color: string; lab
   timed_out: { icon: AlertTriangle, color: "text-tool-failed", label: "Timed out" },
 };
 
+const errorClassDescriptions: Record<string, string> = {
+  element_not_found: "Element not found on page. The agent will inspect the DOM and retry with corrected selectors.",
+  login_required: "Login is required. The agent will attempt to log in automatically.",
+  captcha_detected: "A CAPTCHA was detected. You may need to solve it manually.",
+  page_load_error: "The page failed to load. The agent will retry navigation.",
+  timeout: "The action timed out. The agent will wait and retry.",
+  navigation_error: "Navigation failed. The agent will try an alternative approach.",
+  permission_denied: "Access was denied. The page may require different credentials.",
+  session_expired: "The browser session expired. The agent will start a new session.",
+};
+
 export function ToolCard({ toolRun, conversationId }: Props) {
   const { user } = useAuth();
   const { toast } = useToast();
@@ -165,6 +176,19 @@ export function ToolCard({ toolRun, conversationId }: Props) {
                 <Badge variant="outline" className="text-[10px] text-amber-500 border-amber-500/30">
                   {(output as any).error_class}
                 </Badge>
+                <p className="text-[10px] text-muted-foreground mt-1">
+                  {errorClassDescriptions[(output as any).error_class] || "The agent will attempt to resolve this automatically."}
+                </p>
+              </div>
+            )}
+            {output && (output as any).has_failures && (
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-amber-500 mb-1 flex items-center gap-1">
+                  <AlertTriangle className="w-3 h-3" /> Steps Failed
+                </p>
+                <p className="text-[10px] text-muted-foreground">
+                  {(output as any).failed_step_count || 0} step(s) failed. The agent will read DOM hints and retry with corrected selectors.
+                </p>
               </div>
             )}
             {output && (output as any).healing_applied && (
