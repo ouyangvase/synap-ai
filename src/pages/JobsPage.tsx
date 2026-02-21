@@ -5,32 +5,67 @@ import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog";
+
 import {
   ArrowLeft,
   Play,
+  Plus,
   Calendar,
   Clock,
   CheckCircle,
   XCircle,
   Loader,
+  Trash2,
+  Save,
+  SkipForward,
+  Settings,
+  History,
+  Webhook,
+  Globe,
 } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
 interface Job {
   id: string;
   name: string;
+  description: string | null;
   schedule: string | null;
   is_active: boolean;
   last_run_at: string | null;
-  workflow_name: string;
+  workflow_name: string | null;
+  workflow_payload: Record<string, unknown> | null;
+  task_type: string;
+  task_config: Record<string, unknown>;
+  schedule_type: string;
+  daily_time: string;
+  timezone: string;
+  cron_expr: string | null;
   created_at: string;
+  updated_at: string | null;
+  user_id: string | null;
 }
 
 interface JobRun {
@@ -43,52 +78,106 @@ interface JobRun {
   output: unknown;
   error: string | null;
   input: unknown;
+  duration_ms: number | null;
+  artifacts: unknown;
   created_at: string;
 }
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 function formatDate(dateStr: string | null): string {
   if (!dateStr) return "Never";
-  const d = new Date(dateStr);
-  return d.toLocaleString();
+  return new Date(dateStr).toLocaleString();
+}
+
+function formatDuration(ms: number | null, startedAt: string | null, completedAt: string | null): string {
+  if (ms) return `${(ms / 1000).toFixed(1)}s`;
+  if (startedAt && completedAt) {
+    return `${((new Date(completedAt).getTime() - new Date(startedAt).getTime()) / 1000).toFixed(1)}s`;
+  }
+  return "-";
 }
 
 function statusBadgeVariant(status: string): "default" | "secondary" | "destructive" | "outline" {
   switch (status) {
-    case "completed":
-      return "default";
-    case "running":
-      return "secondary";
-    case "failed":
-      return "destructive";
-    default:
-      return "outline";
+    case "success": case "completed": return "default";
+    case "running": return "secondary";
+    case "failed": return "destructive";
+    default: return "outline";
   }
 }
 
 function StatusIcon({ status }: { status: string }) {
   switch (status) {
-    case "completed":
-      return <CheckCircle className="w-3.5 h-3.5" />;
-    case "running":
-      return <Loader className="w-3.5 h-3.5 animate-spin" />;
-    case "failed":
-      return <XCircle className="w-3.5 h-3.5" />;
-    default:
-      return <Clock className="w-3.5 h-3.5" />;
+    case "success": case "completed": return <CheckCircle className="w-3.5 h-3.5" />;
+    case "running": return <Loader className="w-3.5 h-3.5 animate-spin" />;
+    case "failed": return <XCircle className="w-3.5 h-3.5" />;
+    case "skipped": return <SkipForward className="w-3.5 h-3.5" />;
+    default: return <Clock className="w-3.5 h-3.5" />;
   }
 }
 
+function TaskTypeIcon({ type }: { type: string }) {
+  if (type === "browser_flow") return <Globe className="w-3.5 h-3.5" />;
+  return <Webhook className="w-3.5 h-3.5" />;
+}
+
+const TIMEZONES = [
+  "Asia/Kuala_Lumpur",
+  "Asia/Singapore",
+  "Asia/Tokyo",
+  "Asia/Shanghai",
+  "Asia/Kolkata",
+  "Asia/Dubai",
+  "Europe/London",
+  "Europe/Paris",
+  "Europe/Berlin",
+  "America/New_York",
+  "America/Chicago",
+  "America/Los_Angeles",
+  "Pacific/Auckland",
+  "Australia/Sydney",
+  "UTC",
+];
+
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
+
 export default function JobsPage() {
-  const { session } = useAuth();
+  const { session, user } = useAuth();
   const navigate = useNavigate();
+  const { toast } = useToast();
 
   const [jobs, setJobs] = useState<Job[]>([]);
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
   const [jobRuns, setJobRuns] = useState<JobRun[]>([]);
   const [loadingJobs, setLoadingJobs] = useState(true);
   const [loadingRuns, setLoadingRuns] = useState(false);
-  const [runningCron, setRunningCron] = useState(false);
-  const [cronResult, setCronResult] = useState<string | null>(null);
+  const [runningJob, setRunningJob] = useState<string | null>(null); // job id being run
+  const [savingJob, setSavingJob] = useState(false);
+  const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState("settings");
+
+  // Editable fields for selected job
+  const [editName, setEditName] = useState("");
+  const [editDescription, setEditDescription] = useState("");
+  const [editScheduleType, setEditScheduleType] = useState("daily");
+  const [editDailyTime, setEditDailyTime] = useState("08:00");
+  const [editTimezone, setEditTimezone] = useState("Asia/Kuala_Lumpur");
+  const [editCronExpr, setEditCronExpr] = useState("");
+  const [editTaskType, setEditTaskType] = useState("n8n_webhook");
+  const [editWebhookUrl, setEditWebhookUrl] = useState("");
+  const [editWebhookMethod, setEditWebhookMethod] = useState("POST");
+  const [editWebhookPayload, setEditWebhookPayload] = useState("");
+  const [editIsActive, setEditIsActive] = useState(true);
+
+  // Create dialog fields
+  const [newName, setNewName] = useState("");
+  const [newTaskType, setNewTaskType] = useState("n8n_webhook");
 
   // ---------- Fetch all jobs ----------
   const fetchJobs = useCallback(async () => {
@@ -121,9 +210,7 @@ export default function JobsPage() {
   }, []);
 
   // ---------- Initial load ----------
-  useEffect(() => {
-    fetchJobs();
-  }, [fetchJobs]);
+  useEffect(() => { fetchJobs(); }, [fetchJobs]);
 
   // ---------- Fetch runs when a job is selected ----------
   useEffect(() => {
@@ -134,7 +221,31 @@ export default function JobsPage() {
     }
   }, [selectedJob, fetchJobRuns]);
 
-  // ---------- Real-time subscription on job_runs ----------
+  // ---------- Populate edit fields when a job is selected ----------
+  useEffect(() => {
+    if (!selectedJob) return;
+    setEditName(selectedJob.name || "");
+    setEditDescription(selectedJob.description || "");
+    setEditScheduleType(selectedJob.schedule_type || "daily");
+    setEditDailyTime(selectedJob.daily_time || "08:00");
+    setEditTimezone(selectedJob.timezone || "Asia/Kuala_Lumpur");
+    setEditCronExpr(selectedJob.cron_expr || "");
+    setEditTaskType(selectedJob.task_type || "n8n_webhook");
+    setEditIsActive(selectedJob.is_active);
+
+    const cfg = selectedJob.task_config || {};
+    setEditWebhookUrl((cfg.webhook_url as string) || "");
+    setEditWebhookMethod((cfg.method as string) || "POST");
+    try {
+      setEditWebhookPayload(
+        cfg.payload ? JSON.stringify(cfg.payload, null, 2) : ""
+      );
+    } catch {
+      setEditWebhookPayload("");
+    }
+  }, [selectedJob]);
+
+  // ---------- Real-time subscription ----------
   useEffect(() => {
     const channel = supabase
       .channel("job-runs-realtime")
@@ -143,8 +254,6 @@ export default function JobsPage() {
         { event: "*", schema: "public", table: "job_runs" },
         (payload: any) => {
           const updatedRun = payload.new as JobRun;
-
-          // Update the run list if it belongs to the selected job
           if (selectedJob && updatedRun.job_id === selectedJob.id) {
             setJobRuns((prev) => {
               const idx = prev.findIndex((r) => r.id === updatedRun.id);
@@ -156,99 +265,196 @@ export default function JobsPage() {
               return [updatedRun, ...prev];
             });
           }
-
-          // Also refresh jobs list to pick up last_run_at changes
           fetchJobs();
         }
       )
       .subscribe();
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
+    return () => { supabase.removeChannel(channel); };
   }, [selectedJob, fetchJobs]);
 
-  // ---------- Run Now: call the daily-cron edge function ----------
-  const handleRunNow = useCallback(async () => {
-    setRunningCron(true);
-    setCronResult(null);
+  // ---------- Create a new job ----------
+  const handleCreate = async () => {
+    if (!newName.trim() || !user) return;
+    const { data, error } = await (supabase as any)
+      .from("jobs")
+      .insert({
+        name: newName.trim(),
+        user_id: user.id,
+        task_type: newTaskType,
+        schedule_type: "daily",
+        daily_time: "08:00",
+        timezone: "Asia/Kuala_Lumpur",
+        is_active: false,
+        task_config: {},
+      })
+      .select()
+      .single();
 
-    try {
-      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-      const serviceRoleKey = import.meta.env.VITE_SUPABASE_SERVICE_ROLE_KEY;
+    if (error) {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+      return;
+    }
+    setCreateDialogOpen(false);
+    setNewName("");
+    await fetchJobs();
+    if (data) {
+      setSelectedJob(data as Job);
+      setActiveTab("settings");
+    }
+  };
 
-      // Fall back to user's access token if service role key is not available on the client
-      const token = serviceRoleKey || session?.access_token;
+  // ---------- Save job settings ----------
+  const handleSave = async () => {
+    if (!selectedJob) return;
+    setSavingJob(true);
 
-      if (!token) {
-        setCronResult("Error: No authentication token available.");
+    let payload: Record<string, unknown> | undefined;
+    if (editWebhookPayload.trim()) {
+      try {
+        payload = JSON.parse(editWebhookPayload);
+      } catch {
+        toast({ title: "Invalid JSON", description: "Payload must be valid JSON.", variant: "destructive" });
+        setSavingJob(false);
         return;
       }
+    }
 
-      const resp = await fetch(`${supabaseUrl}/functions/v1/daily-cron`, {
+    const taskConfig: Record<string, unknown> = {};
+    if (editTaskType === "n8n_webhook") {
+      if (editWebhookUrl) taskConfig.webhook_url = editWebhookUrl;
+      taskConfig.method = editWebhookMethod;
+      if (payload) taskConfig.payload = payload;
+    }
+
+    const { error } = await (supabase as any)
+      .from("jobs")
+      .update({
+        name: editName.trim() || selectedJob.name,
+        description: editDescription.trim() || null,
+        schedule_type: editScheduleType,
+        daily_time: editDailyTime,
+        timezone: editTimezone,
+        cron_expr: editCronExpr || null,
+        task_type: editTaskType,
+        task_config: taskConfig,
+        is_active: editIsActive,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", selectedJob.id);
+
+    if (error) {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    } else {
+      toast({ title: "Saved", description: "Job settings updated." });
+      await fetchJobs();
+      // Refresh the selected job data
+      const { data: refreshed } = await (supabase as any)
+        .from("jobs")
+        .select("*")
+        .eq("id", selectedJob.id)
+        .single();
+      if (refreshed) setSelectedJob(refreshed as Job);
+    }
+    setSavingJob(false);
+  };
+
+  // ---------- Run a single job now ----------
+  const handleRunSingleJob = async (jobId: string) => {
+    setRunningJob(jobId);
+    try {
+      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+      const token = session?.access_token;
+      if (!token) throw new Error("Not authenticated");
+
+      const resp = await fetch(`${supabaseUrl}/functions/v1/jobs-run`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
+          apikey: import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
         },
+        body: JSON.stringify({ job_id: jobId }),
       });
 
       const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || resp.statusText);
 
-      if (resp.ok) {
-        setCronResult(
-          `Completed: ${data.completed ?? 0} | Failed: ${data.failed ?? 0} | Skipped: ${data.skipped ?? 0}`
-        );
-        // Refresh data
-        fetchJobs();
-        if (selectedJob) fetchJobRuns(selectedJob.id);
-      } else {
-        setCronResult(`Error: ${data.error || resp.statusText}`);
+      const result = data.results?.[0];
+      if (result?.status === "success") {
+        toast({ title: "Job completed", description: `${result.job_name} finished in ${((result.duration_ms || 0) / 1000).toFixed(1)}s` });
+      } else if (result?.status === "skipped") {
+        toast({ title: "Job skipped", description: result.reason || "Already run today" });
+      } else if (result?.status === "failed") {
+        toast({ title: "Job failed", description: result.error, variant: "destructive" });
       }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setCronResult(`Error: ${msg}`);
+
+      await fetchJobs();
+      if (selectedJob?.id === jobId) await fetchJobRuns(jobId);
+    } catch (err: any) {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
     } finally {
-      setRunningCron(false);
+      setRunningJob(null);
     }
-  }, [session, selectedJob, fetchJobs, fetchJobRuns]);
+  };
+
+  // ---------- Delete a job ----------
+  const handleDelete = async (jobId: string) => {
+    const { error } = await (supabase as any)
+      .from("jobs")
+      .delete()
+      .eq("id", jobId);
+
+    if (error) {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    } else {
+      toast({ title: "Deleted", description: "Job removed." });
+      if (selectedJob?.id === jobId) setSelectedJob(null);
+      await fetchJobs();
+    }
+    setDeleteConfirmId(null);
+  };
+
+  // ---------- Toggle active inline ----------
+  const handleToggleActive = async (job: Job) => {
+    const { error } = await (supabase as any)
+      .from("jobs")
+      .update({ is_active: !job.is_active, updated_at: new Date().toISOString() })
+      .eq("id", job.id);
+
+    if (!error) {
+      await fetchJobs();
+      if (selectedJob?.id === job.id) {
+        setSelectedJob({ ...job, is_active: !job.is_active });
+        setEditIsActive(!job.is_active);
+      }
+    }
+  };
 
   // ---------- Select a job ----------
   const handleSelectJob = (job: Job) => {
     setSelectedJob(job);
-    setCronResult(null);
+    setActiveTab("settings");
   };
+
+  // ==========================================================================
+  // Render
+  // ==========================================================================
 
   return (
     <div className="flex h-screen bg-background text-foreground overflow-hidden">
-      {/* Left panel: Jobs list */}
+      {/* ---- Left panel: Jobs list ---- */}
       <div className="w-80 border-r border-border flex flex-col">
         <div className="p-4 border-b border-border flex items-center gap-2">
           <Button variant="ghost" size="icon" onClick={() => navigate("/")}>
             <ArrowLeft className="w-4 h-4" />
           </Button>
-          <h1 className="text-sm font-bold tracking-wide uppercase text-muted-foreground">
+          <h1 className="text-sm font-bold tracking-wide uppercase text-muted-foreground flex-1">
             Jobs
           </h1>
-        </div>
-
-        <div className="p-3 border-b border-border space-y-2">
-          <Button
-            className="w-full"
-            size="sm"
-            onClick={handleRunNow}
-            disabled={runningCron}
-          >
-            {runningCron ? (
-              <Loader className="w-4 h-4 animate-spin mr-2" />
-            ) : (
-              <Play className="w-4 h-4 mr-2" />
-            )}
-            Run All Jobs Now
+          <Button variant="outline" size="sm" onClick={() => setCreateDialogOpen(true)} className="gap-1.5">
+            <Plus className="w-3.5 h-3.5" /> New
           </Button>
-          {cronResult && (
-            <p className="text-xs text-muted-foreground px-1">{cronResult}</p>
-          )}
         </div>
 
         <div className="flex-1 overflow-y-auto">
@@ -257,9 +463,13 @@ export default function JobsPage() {
               <Loader className="w-5 h-5 animate-spin text-muted-foreground" />
             </div>
           ) : jobs.length === 0 ? (
-            <p className="text-sm text-muted-foreground p-4 text-center">
-              No jobs found.
-            </p>
+            <div className="flex flex-col items-center justify-center h-full p-4 text-center gap-3">
+              <Settings className="w-10 h-10 text-muted-foreground/30" />
+              <p className="text-sm text-muted-foreground">No jobs yet.</p>
+              <Button variant="outline" size="sm" onClick={() => setCreateDialogOpen(true)} className="gap-1.5">
+                <Plus className="w-3.5 h-3.5" /> Create your first job
+              </Button>
+            </div>
           ) : (
             <div className="divide-y divide-border">
               {jobs.map((job) => (
@@ -274,22 +484,29 @@ export default function JobsPage() {
                     <span className="text-sm font-medium truncate pr-2">
                       {job.name}
                     </span>
-                    <Badge
-                      variant={job.is_active ? "default" : "outline"}
-                      className="text-[10px] shrink-0"
-                    >
-                      {job.is_active ? "Active" : "Inactive"}
-                    </Badge>
-                  </div>
-                  {job.schedule && (
-                    <div className="flex items-center gap-1 text-xs text-muted-foreground mb-1">
-                      <Calendar className="w-3 h-3" />
-                      <span>{job.schedule}</span>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <TaskTypeIcon type={job.task_type} />
+                      <Badge
+                        variant={job.is_active ? "default" : "outline"}
+                        className="text-[10px]"
+                      >
+                        {job.is_active ? "Active" : "Off"}
+                      </Badge>
                     </div>
-                  )}
+                  </div>
+                  <div className="flex items-center gap-1 text-xs text-muted-foreground mb-0.5">
+                    <Calendar className="w-3 h-3" />
+                    <span>
+                      {job.schedule_type === "daily"
+                        ? `Daily at ${job.daily_time || "08:00"} (${job.timezone || "UTC"})`
+                        : job.schedule_type === "cron"
+                          ? job.cron_expr || "Cron"
+                          : "Manual"}
+                    </span>
+                  </div>
                   <div className="flex items-center gap-1 text-xs text-muted-foreground">
                     <Clock className="w-3 h-3" />
-                    <span>Last run: {formatDate(job.last_run_at)}</span>
+                    <span>Last: {formatDate(job.last_run_at)}</span>
                   </div>
                 </button>
               ))}
@@ -298,123 +515,386 @@ export default function JobsPage() {
         </div>
       </div>
 
-      {/* Main panel: Job runs */}
+      {/* ---- Main panel ---- */}
       <div className="flex-1 flex flex-col overflow-hidden">
         {selectedJob ? (
           <>
+            {/* Header */}
             <div className="p-4 border-b border-border">
               <div className="flex items-center justify-between">
-                <div>
-                  <h2 className="text-lg font-semibold">{selectedJob.name}</h2>
-                  <p className="text-sm text-muted-foreground">
-                    Workflow: {selectedJob.workflow_name}
-                    {selectedJob.schedule ? ` | Schedule: ${selectedJob.schedule}` : ""}
-                  </p>
+                <div className="flex items-center gap-3">
+                  <div>
+                    <h2 className="text-lg font-semibold">{selectedJob.name}</h2>
+                    <p className="text-xs text-muted-foreground">
+                      {selectedJob.task_type === "n8n_webhook" ? "Webhook" : "Browser Flow"}
+                      {" | "}
+                      {selectedJob.schedule_type === "daily"
+                        ? `Daily at ${selectedJob.daily_time}`
+                        : selectedJob.schedule_type === "cron"
+                          ? "Cron"
+                          : "Manual"}
+                    </p>
+                  </div>
                 </div>
-                <Badge variant={selectedJob.is_active ? "default" : "outline"}>
-                  {selectedJob.is_active ? "Active" : "Inactive"}
-                </Badge>
+                <div className="flex items-center gap-2">
+                  <Switch
+                    checked={selectedJob.is_active}
+                    onCheckedChange={() => handleToggleActive(selectedJob)}
+                  />
+                  <span className="text-xs text-muted-foreground mr-2">
+                    {selectedJob.is_active ? "Enabled" : "Disabled"}
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="gap-1.5"
+                    onClick={() => handleRunSingleJob(selectedJob.id)}
+                    disabled={runningJob === selectedJob.id}
+                  >
+                    {runningJob === selectedJob.id ? (
+                      <Loader className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Play className="w-3.5 h-3.5" />
+                    )}
+                    Run Now
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="text-destructive hover:text-destructive"
+                    onClick={() => setDeleteConfirmId(selectedJob.id)}
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </Button>
+                </div>
               </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-4">
-              {loadingRuns ? (
-                <div className="flex items-center justify-center p-8">
-                  <Loader className="w-5 h-5 animate-spin text-muted-foreground" />
-                </div>
-              ) : jobRuns.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
-                  <Calendar className="w-10 h-10 mb-3 opacity-50" />
-                  <p className="text-sm">No runs recorded for this job yet.</p>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {jobRuns.map((run) => (
-                    <Card key={run.id} className="bg-card border-border">
-                      <CardHeader className="pb-2 pt-4 px-4">
-                        <div className="flex items-center justify-between">
-                          <CardTitle className="text-sm font-medium flex items-center gap-2">
-                            <Calendar className="w-4 h-4 text-muted-foreground" />
-                            {run.run_date}
-                          </CardTitle>
-                          <Badge
-                            variant={statusBadgeVariant(run.status)}
-                            className="flex items-center gap-1"
-                          >
-                            <StatusIcon status={run.status} />
-                            {run.status}
-                          </Badge>
+            {/* Tabs */}
+            <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col overflow-hidden">
+              <TabsList className="mx-4 mt-2 w-fit">
+                <TabsTrigger value="settings" className="gap-1.5">
+                  <Settings className="w-3.5 h-3.5" /> Settings
+                </TabsTrigger>
+                <TabsTrigger value="history" className="gap-1.5">
+                  <History className="w-3.5 h-3.5" /> Run History
+                </TabsTrigger>
+              </TabsList>
+
+              {/* ---- Settings Tab ---- */}
+              <TabsContent value="settings" className="flex-1 overflow-y-auto p-4 space-y-6 mt-0">
+                {/* General */}
+                <Card>
+                  <CardHeader className="pb-3">
+                    <CardTitle className="text-sm">General</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="job-name">Name</Label>
+                      <Input
+                        id="job-name"
+                        value={editName}
+                        onChange={(e) => setEditName(e.target.value)}
+                        placeholder="Job name"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="job-desc">Description</Label>
+                      <Input
+                        id="job-desc"
+                        value={editDescription}
+                        onChange={(e) => setEditDescription(e.target.value)}
+                        placeholder="Optional description"
+                      />
+                    </div>
+                  </CardContent>
+                </Card>
+
+                {/* Schedule */}
+                <Card>
+                  <CardHeader className="pb-3">
+                    <CardTitle className="text-sm">Schedule</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <Label>Schedule Type</Label>
+                        <Select value={editScheduleType} onValueChange={setEditScheduleType}>
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="daily">Daily</SelectItem>
+                            <SelectItem value="cron">Cron Expression</SelectItem>
+                            <SelectItem value="manual">Manual Only</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="space-y-2">
+                        <Label>Timezone</Label>
+                        <Select value={editTimezone} onValueChange={setEditTimezone}>
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {TIMEZONES.map((tz) => (
+                              <SelectItem key={tz} value={tz}>{tz}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </div>
+
+                    {editScheduleType === "daily" && (
+                      <div className="space-y-2">
+                        <Label htmlFor="daily-time">Run Time (24h)</Label>
+                        <Input
+                          id="daily-time"
+                          type="time"
+                          value={editDailyTime}
+                          onChange={(e) => setEditDailyTime(e.target.value)}
+                        />
+                      </div>
+                    )}
+
+                    {editScheduleType === "cron" && (
+                      <div className="space-y-2">
+                        <Label htmlFor="cron-expr">Cron Expression</Label>
+                        <Input
+                          id="cron-expr"
+                          value={editCronExpr}
+                          onChange={(e) => setEditCronExpr(e.target.value)}
+                          placeholder="0 8 * * *"
+                        />
+                        <p className="text-xs text-muted-foreground">Standard 5-field cron format (min hour dom month dow)</p>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+
+                {/* Task Configuration */}
+                <Card>
+                  <CardHeader className="pb-3">
+                    <CardTitle className="text-sm">Task Configuration</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="space-y-2">
+                      <Label>Task Type</Label>
+                      <Select value={editTaskType} onValueChange={setEditTaskType}>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="n8n_webhook">Webhook (n8n / HTTP)</SelectItem>
+                          <SelectItem value="browser_flow">Browser Flow (coming soon)</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    {editTaskType === "n8n_webhook" && (
+                      <>
+                        <div className="space-y-2">
+                          <Label htmlFor="webhook-url">Webhook URL</Label>
+                          <Input
+                            id="webhook-url"
+                            value={editWebhookUrl}
+                            onChange={(e) => setEditWebhookUrl(e.target.value)}
+                            placeholder="https://n8n.example.com/webhook/..."
+                          />
                         </div>
-                      </CardHeader>
-                      <CardContent className="px-4 pb-4">
-                        <Table>
-                          <TableHeader>
-                            <TableRow>
-                              <TableHead className="h-8 text-xs">Started</TableHead>
-                              <TableHead className="h-8 text-xs">Completed</TableHead>
-                              <TableHead className="h-8 text-xs">Duration</TableHead>
-                            </TableRow>
-                          </TableHeader>
-                          <TableBody>
-                            <TableRow>
-                              <TableCell className="text-xs py-2">
-                                {formatDate(run.started_at)}
-                              </TableCell>
-                              <TableCell className="text-xs py-2">
-                                {formatDate(run.completed_at)}
-                              </TableCell>
-                              <TableCell className="text-xs py-2">
-                                {run.started_at && run.completed_at
-                                  ? `${(
-                                      (new Date(run.completed_at).getTime() -
-                                        new Date(run.started_at).getTime()) /
-                                      1000
-                                    ).toFixed(1)}s`
-                                  : "-"}
-                              </TableCell>
-                            </TableRow>
-                          </TableBody>
-                        </Table>
+                        <div className="space-y-2">
+                          <Label>HTTP Method</Label>
+                          <Select value={editWebhookMethod} onValueChange={setEditWebhookMethod}>
+                            <SelectTrigger>
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="POST">POST</SelectItem>
+                              <SelectItem value="GET">GET</SelectItem>
+                              <SelectItem value="PUT">PUT</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="webhook-payload">Payload (JSON, optional)</Label>
+                          <textarea
+                            id="webhook-payload"
+                            className="w-full min-h-[80px] rounded-md border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            value={editWebhookPayload}
+                            onChange={(e) => setEditWebhookPayload(e.target.value)}
+                            placeholder='{"key": "value"}'
+                          />
+                        </div>
+                      </>
+                    )}
 
-                        {run.error && (
-                          <div className="mt-3 p-2 rounded bg-destructive/10 border border-destructive/20">
-                            <p className="text-xs font-medium text-destructive flex items-center gap-1 mb-1">
-                              <XCircle className="w-3 h-3" />
-                              Error
-                            </p>
-                            <pre className="text-xs text-destructive/80 whitespace-pre-wrap break-all">
-                              {run.error}
-                            </pre>
-                          </div>
-                        )}
+                    {editTaskType === "browser_flow" && (
+                      <div className="rounded-md bg-muted/50 p-4 text-sm text-muted-foreground">
+                        Browser Flow automation is coming soon. You'll be able to define multi-step browser actions (navigate, fill forms, extract data) that run on a schedule.
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
 
-                        {run.output && (
-                          <div className="mt-3 p-2 rounded bg-muted/50 border border-border">
-                            <p className="text-xs font-medium text-muted-foreground flex items-center gap-1 mb-1">
-                              <CheckCircle className="w-3 h-3" />
-                              Output
-                            </p>
-                            <pre className="text-xs text-muted-foreground whitespace-pre-wrap break-all max-h-40 overflow-y-auto">
-                              {typeof run.output === "string"
-                                ? run.output
-                                : JSON.stringify(run.output, null, 2)}
-                            </pre>
-                          </div>
-                        )}
-                      </CardContent>
-                    </Card>
-                  ))}
+                {/* Save button */}
+                <div className="flex justify-end pb-4">
+                  <Button onClick={handleSave} disabled={savingJob} className="gap-1.5">
+                    {savingJob ? <Loader className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                    Save Changes
+                  </Button>
                 </div>
-              )}
-            </div>
+              </TabsContent>
+
+              {/* ---- History Tab ---- */}
+              <TabsContent value="history" className="flex-1 overflow-y-auto p-4 mt-0">
+                {loadingRuns ? (
+                  <div className="flex items-center justify-center p-8">
+                    <Loader className="w-5 h-5 animate-spin text-muted-foreground" />
+                  </div>
+                ) : jobRuns.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center h-64 text-muted-foreground">
+                    <History className="w-10 h-10 mb-3 opacity-30" />
+                    <p className="text-sm">No runs recorded yet.</p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="mt-3 gap-1.5"
+                      onClick={() => handleRunSingleJob(selectedJob.id)}
+                      disabled={runningJob === selectedJob.id}
+                    >
+                      <Play className="w-3.5 h-3.5" /> Run Now
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {jobRuns.map((run) => (
+                      <Card key={run.id} className="bg-card border-border">
+                        <CardHeader className="pb-2 pt-3 px-4">
+                          <div className="flex items-center justify-between">
+                            <CardTitle className="text-sm font-medium flex items-center gap-2">
+                              <Calendar className="w-4 h-4 text-muted-foreground" />
+                              {run.run_date}
+                            </CardTitle>
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs text-muted-foreground">
+                                {formatDuration(run.duration_ms, run.started_at, run.completed_at)}
+                              </span>
+                              <Badge
+                                variant={statusBadgeVariant(run.status)}
+                                className="flex items-center gap-1"
+                              >
+                                <StatusIcon status={run.status} />
+                                {run.status}
+                              </Badge>
+                            </div>
+                          </div>
+                        </CardHeader>
+                        <CardContent className="px-4 pb-3">
+                          <div className="text-xs text-muted-foreground mb-2">
+                            Started: {formatDate(run.started_at)} | Completed: {formatDate(run.completed_at)}
+                          </div>
+
+                          {run.error && (
+                            <div className="p-2 rounded bg-destructive/10 border border-destructive/20 mb-2">
+                              <p className="text-xs font-medium text-destructive flex items-center gap-1 mb-1">
+                                <XCircle className="w-3 h-3" /> Error
+                              </p>
+                              <pre className="text-xs text-destructive/80 whitespace-pre-wrap break-all">
+                                {run.error}
+                              </pre>
+                            </div>
+                          )}
+
+                          {run.output && (
+                            <div className="p-2 rounded bg-muted/50 border border-border">
+                              <p className="text-xs font-medium text-muted-foreground flex items-center gap-1 mb-1">
+                                <CheckCircle className="w-3 h-3" /> Output
+                              </p>
+                              <pre className="text-xs text-muted-foreground whitespace-pre-wrap break-all max-h-40 overflow-y-auto">
+                                {typeof run.output === "string"
+                                  ? run.output
+                                  : JSON.stringify(run.output, null, 2)}
+                              </pre>
+                            </div>
+                          )}
+                        </CardContent>
+                      </Card>
+                    ))}
+                  </div>
+                )}
+              </TabsContent>
+            </Tabs>
           </>
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground">
-            <Clock className="w-12 h-12 mb-4 opacity-30" />
-            <p className="text-sm">Select a job from the left panel to view its run history.</p>
+            <Settings className="w-12 h-12 mb-4 opacity-20" />
+            <p className="text-sm">Select a job to configure or view its history.</p>
+            <Button
+              variant="outline"
+              size="sm"
+              className="mt-3 gap-1.5"
+              onClick={() => setCreateDialogOpen(true)}
+            >
+              <Plus className="w-3.5 h-3.5" /> Create Job
+            </Button>
           </div>
         )}
       </div>
+
+      {/* ---- Create Job Dialog ---- */}
+      <Dialog open={createDialogOpen} onOpenChange={setCreateDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Create New Job</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-2">
+              <Label htmlFor="new-name">Job Name</Label>
+              <Input
+                id="new-name"
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                placeholder="e.g. Daily Order Check"
+                onKeyDown={(e) => { if (e.key === "Enter") handleCreate(); }}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Task Type</Label>
+              <Select value={newTaskType} onValueChange={setNewTaskType}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="n8n_webhook">Webhook (n8n / HTTP)</SelectItem>
+                  <SelectItem value="browser_flow">Browser Flow</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCreateDialogOpen(false)}>Cancel</Button>
+            <Button onClick={handleCreate} disabled={!newName.trim()}>Create</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ---- Delete Confirmation Dialog ---- */}
+      <Dialog open={!!deleteConfirmId} onOpenChange={() => setDeleteConfirmId(null)}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Delete Job</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            This will permanently delete the job and all its run history. This action cannot be undone.
+          </p>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteConfirmId(null)}>Cancel</Button>
+            <Button variant="destructive" onClick={() => deleteConfirmId && handleDelete(deleteConfirmId)}>
+              Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
