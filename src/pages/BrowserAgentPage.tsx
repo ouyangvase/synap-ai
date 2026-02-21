@@ -225,8 +225,8 @@ export default function BrowserAgentPage() {
   return (
     <div className="flex h-screen bg-background text-foreground overflow-hidden">
       {/* Left: Controls + Timeline */}
-      <div className="w-80 border-r border-border flex flex-col">
-        <div className="p-4 border-b border-border flex items-center gap-2">
+      <div className="w-80 border-r border-border glass-subtle flex flex-col">
+        <div className="p-4 border-b border-border glass-subtle flex items-center gap-2">
           <Button variant="ghost" size="icon" onClick={() => navigate("/")}>
             <ArrowLeft className="w-4 h-4" />
           </Button>
@@ -261,7 +261,7 @@ export default function BrowserAgentPage() {
       </div>
 
       {/* Right: Task Panel */}
-      <div className="w-96 border-l border-border flex flex-col">
+      <div className="w-96 border-l border-border glass-subtle flex flex-col">
         <TaskPanel
           session={session}
           onSubmitTask={submitTask}

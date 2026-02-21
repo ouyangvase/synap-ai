@@ -35,7 +35,7 @@ export function ActionTimeline({ actions }: { actions: Action[] }) {
       {actions.map((action) => (
         <div
           key={action.id}
-          className="flex items-start gap-2 py-2 px-2 rounded hover:bg-muted/30 transition-colors"
+          className="flex items-start gap-2 py-2 px-2 rounded-xl hover:bg-muted/30 transition-colors"
         >
           <div className="mt-0.5">{statusIcons[action.status] || statusIcons.pending}</div>
           <div className="flex-1 min-w-0">

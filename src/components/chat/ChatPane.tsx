@@ -220,12 +220,16 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
 
   if (!conversationId) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center gap-4">
-        <Bot className="w-12 h-12 text-muted-foreground/30" />
-        <p className="text-muted-foreground text-sm">Select or start a conversation</p>
-        <Button onClick={onNewChat} variant="outline" className="gap-2">
-          <Plus className="w-4 h-4" /> New conversation
-        </Button>
+      <div className="flex-1 flex flex-col items-center justify-center gap-6">
+        <div className="glass elevation-1 rounded-2xl p-8 flex flex-col items-center gap-4">
+          <div className="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center">
+            <Bot className="w-8 h-8 text-primary/40" />
+          </div>
+          <p className="text-muted-foreground text-sm">Select or start a conversation</p>
+          <Button onClick={onNewChat} variant="outline" className="gap-2 rounded-xl">
+            <Plus className="w-4 h-4" /> New conversation
+          </Button>
+        </div>
       </div>
     );
   }
@@ -236,12 +240,12 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
       <div className={`flex flex-col min-w-0 ${screenshotPanelOpen && latestScreenshot ? "w-1/2" : "flex-1"}`}>
         {/* Screenshot panel toggle button */}
         {latestScreenshot && !screenshotPanelOpen && (
-          <div className="p-2 border-b border-border bg-primary/5">
+          <div className="p-2 border-b border-border glass-subtle">
             <Button
               variant="outline"
               size="sm"
               onClick={() => setScreenshotPanelOpen(true)}
-              className="gap-2 text-xs"
+              className="gap-2 text-xs rounded-xl"
             >
               <Monitor className="w-3.5 h-3.5" />
               Show Browser Screenshot
@@ -298,7 +302,7 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
       </div>
 
       {/* Input area */}
-      <div className="border-t border-border p-4">
+      <div className="border-t border-border p-4 glass-subtle">
         <form
           onSubmit={(e) => { e.preventDefault(); handleSend(); }}
           className="flex gap-2 max-w-3xl mx-auto"
@@ -308,9 +312,9 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
             onChange={(e) => setInput(e.target.value)}
             placeholder="Message the agent…"
             disabled={isStreaming}
-            className="flex-1 bg-secondary border-border"
+            className="flex-1 bg-secondary/50 border-border rounded-xl h-11"
           />
-          <Button type="submit" size="icon" disabled={isStreaming || !input.trim()}>
+          <Button type="submit" size="icon" disabled={isStreaming || !input.trim()} className="rounded-xl h-11 w-11 shrink-0">
             <Send className="w-4 h-4" />
           </Button>
         </form>
@@ -320,7 +324,7 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
       {/* Browser Screenshot Panel */}
       {screenshotPanelOpen && latestScreenshot && (
         <div className="w-1/2 flex flex-col border-l border-border bg-background">
-          <div className="flex items-center justify-between p-2 border-b border-border bg-muted/50">
+          <div className="flex items-center justify-between p-2 border-b border-border glass-subtle">
             <div className="flex items-center gap-2">
               <ImageIcon className="w-4 h-4 text-primary" />
               <span className="text-xs font-medium">Browser View</span>
@@ -329,17 +333,17 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
             <Button
               variant="ghost"
               size="icon"
-              className="h-6 w-6"
+              className="h-7 w-7 rounded-lg"
               onClick={() => setScreenshotPanelOpen(false)}
             >
               <X className="w-3.5 h-3.5" />
             </Button>
           </div>
-          <div className="flex-1 overflow-auto p-2 flex items-start justify-center bg-muted/20">
+          <div className="flex-1 overflow-auto p-3 flex items-start justify-center">
             <img
               src={`data:image/png;base64,${latestScreenshot}`}
               alt="Browser screenshot"
-              className="max-w-full rounded border border-border shadow-sm"
+              className="max-w-full rounded-xl border border-border elevation-1"
             />
           </div>
         </div>

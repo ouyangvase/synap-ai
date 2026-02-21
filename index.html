@@ -2,16 +2,34 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>AgentHub - AI Agent Platform</title>
-    <meta name="description" content="AgentHub - Internal AI agent platform with chat, browser automation, and image generation">
-    <meta name="author" content="AgentHub" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>HahaRun</title>
+    <meta name="description" content="HahaRun - AI agent platform with chat, browser automation, and image generation">
+    <meta name="author" content="HahaRun" />
     <meta property="og:type" content="website" />
-    <meta property="og:title" content="AgentHub - AI Agent Platform">
+    <meta property="og:title" content="HahaRun">
     <meta property="og:description" content="AI agent platform with chat, browser automation, and image generation">
+    <meta property="og:image" content="/logo-512.png">
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="AgentHub - AI Agent Platform">
+    <meta name="twitter:title" content="HahaRun">
     <meta name="twitter:description" content="AI agent platform with chat, browser automation, and image generation">
+    <meta name="twitter:image" content="/logo-512.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+    <link rel="manifest" href="/manifest.json">
+    <meta name="theme-color" content="#0a0e1a">
+    <script>
+      // Theme initialization - prevent flash
+      (function() {
+        var theme = localStorage.getItem('haharun-theme') || 'system';
+        if (theme === 'system') {
+          theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
+        document.documentElement.classList.toggle('dark', theme === 'dark');
+        document.documentElement.classList.toggle('light', theme === 'light');
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

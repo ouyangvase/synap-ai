@@ -21,8 +21,8 @@ export function BrowserViewer({ session, screenshotUrl, takeOver }: BrowserViewe
 
   if (!session) {
     return (
-      <div className="flex-1 flex items-center justify-center bg-muted/30">
-        <div className="text-center space-y-3">
+      <div className="flex-1 flex items-center justify-center">
+        <div className="text-center space-y-3 glass elevation-1 rounded-2xl p-8">
           <Monitor className="w-16 h-16 text-muted-foreground/40 mx-auto" />
           <p className="text-muted-foreground text-sm">
             Start a browser session to begin
@@ -53,7 +53,7 @@ export function BrowserViewer({ session, screenshotUrl, takeOver }: BrowserViewe
           </Button>
         </div>
         <div className="flex-1 flex items-center justify-center bg-muted/20">
-          <div className="text-center space-y-6 max-w-md px-6">
+          <div className="text-center space-y-6 max-w-md px-6 glass elevation-2 rounded-2xl p-8">
             <div className="relative mx-auto w-20 h-20">
               <Globe className="w-20 h-20 text-destructive/60" />
               <span className="absolute top-0 right-0 flex h-4 w-4">
@@ -94,7 +94,7 @@ export function BrowserViewer({ session, screenshotUrl, takeOver }: BrowserViewe
           <img
             src={screenshotUrl}
             alt="Browser screenshot"
-            className="max-w-full max-h-full object-contain"
+            className="max-w-full max-h-full object-contain rounded-xl elevation-1"
           />
         ) : (
           <div className="text-center space-y-2">
@@ -115,7 +115,7 @@ export function BrowserViewer({ session, screenshotUrl, takeOver }: BrowserViewe
         <img
           src={screenshotUrl}
           alt="Browser screenshot"
-          className="max-w-full max-h-full object-contain"
+          className="max-w-full max-h-full object-contain rounded-xl elevation-1"
         />
       ) : (
         <div className="text-center space-y-2">

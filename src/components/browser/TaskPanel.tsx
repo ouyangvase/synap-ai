@@ -21,7 +21,7 @@ export function TaskPanel({ session, onSubmitTask }: TaskPanelProps) {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="p-4 border-b border-border">
+      <div className="p-4 border-b border-border glass-subtle">
         <h2 className="text-sm font-bold tracking-wide uppercase text-muted-foreground flex items-center gap-2">
           <Bot className="w-4 h-4" />
           Task Panel
@@ -40,7 +40,7 @@ export function TaskPanel({ session, onSubmitTask }: TaskPanelProps) {
           </p>
         )}
         {tasks.map((task, i) => (
-          <div key={i} className="bg-muted/50 rounded-lg p-3 space-y-1">
+          <div key={i} className="glass-subtle rounded-xl p-3 space-y-1">
             <p className="text-sm">{task.description}</p>
             <p className="text-xs text-muted-foreground">{task.time}</p>
           </div>
@@ -48,14 +48,14 @@ export function TaskPanel({ session, onSubmitTask }: TaskPanelProps) {
       </div>
 
       {/* Input area */}
-      <div className="p-4 border-t border-border">
+      <div className="p-4 border-t border-border glass-subtle">
         <div className="flex gap-2">
           <Textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder={session ? "Describe a task…" : "Start a session first"}
             disabled={!session}
-            className="min-h-[60px] resize-none bg-muted/30"
+            className="min-h-[60px] resize-none bg-muted/30 rounded-xl"
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
@@ -67,7 +67,7 @@ export function TaskPanel({ session, onSubmitTask }: TaskPanelProps) {
             onClick={handleSubmit}
             disabled={!session || !input.trim()}
             size="icon"
-            className="shrink-0 self-end"
+            className="shrink-0 self-end rounded-xl"
           >
             <Send className="w-4 h-4" />
           </Button>

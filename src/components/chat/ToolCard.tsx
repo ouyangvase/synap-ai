@@ -100,7 +100,7 @@ export function ToolCard({ toolRun, conversationId }: Props) {
 
   return (
     <div className="max-w-3xl mx-auto px-2 py-2">
-      <div className="border border-border rounded-lg bg-card overflow-hidden">
+      <div className="glass rounded-2xl overflow-hidden elevation-1">
         {/* Header */}
         <button
           onClick={() => setExpanded(!expanded)}
@@ -109,7 +109,7 @@ export function ToolCard({ toolRun, conversationId }: Props) {
           <div className="flex items-center gap-2.5">
             <Wrench className="w-4 h-4 text-muted-foreground" />
             <span className="font-mono text-xs font-medium">{toolName || "tool"}</span>
-            <Badge variant="outline" className={cn("text-[10px] px-1.5 py-0", config.color)}>
+            <Badge variant="outline" className={cn("text-[10px] px-1.5 py-0 rounded-lg", config.color)}>
               <StatusIcon className={cn("w-3 h-3 mr-1", toolRun.status === "running" && "animate-spin")} />
               {config.label}
             </Badge>
@@ -123,11 +123,11 @@ export function ToolCard({ toolRun, conversationId }: Props) {
         </button>
 
         {expanded && (
-          <div className="border-t border-border px-4 py-3 space-y-3">
+          <div className="border-t border-border/50 px-4 py-3 space-y-3">
             {/* Inputs */}
             <div>
               <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Input</p>
-              <pre className="text-xs font-mono bg-secondary rounded p-2 overflow-x-auto max-h-40">
+              <pre className="text-xs font-mono bg-secondary/50 rounded-xl p-2 overflow-x-auto max-h-40">
                 {JSON.stringify(toolRun.input, null, 2)}
               </pre>
             </div>
@@ -137,11 +137,11 @@ export function ToolCard({ toolRun, conversationId }: Props) {
               <div>
                 <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Output</p>
                 {(output as any).markdown_content ? (
-                  <div className="prose prose-sm prose-invert max-w-none text-xs bg-secondary rounded p-2">
+                  <div className="prose prose-sm dark:prose-invert max-w-none text-xs bg-secondary/50 rounded-xl p-2">
                     {(output as any).markdown_content}
                   </div>
                 ) : (
-                  <pre className="text-xs font-mono bg-secondary rounded p-2 overflow-x-auto max-h-40">
+                  <pre className="text-xs font-mono bg-secondary/50 rounded-xl p-2 overflow-x-auto max-h-40">
                     {JSON.stringify(output, null, 2)}
                   </pre>
                 )}
@@ -152,7 +152,7 @@ export function ToolCard({ toolRun, conversationId }: Props) {
             {toolRun.error && (
               <div>
                 <p className="text-[10px] uppercase tracking-wider text-destructive mb-1">Error</p>
-                <pre className="text-xs font-mono bg-destructive/10 text-destructive rounded p-2">
+                <pre className="text-xs font-mono bg-destructive/10 text-destructive rounded-xl p-2">
                   {toolRun.error}
                 </pre>
               </div>
@@ -168,7 +168,7 @@ export function ToolCard({ toolRun, conversationId }: Props) {
 
         {/* Approval bar */}
         {toolRun.status === "pending" && approval?.status === "pending" && (
-          <div className="border-t border-border px-4 py-3 flex items-center justify-between bg-tool-pending/5">
+          <div className="border-t border-border/50 px-4 py-3 flex items-center justify-between glass-subtle">
             <span className="text-xs text-tool-pending font-medium">This tool requires your approval</span>
             <div className="flex gap-2">
               <Button
@@ -176,7 +176,7 @@ export function ToolCard({ toolRun, conversationId }: Props) {
                 variant="outline"
                 onClick={() => handleApproval("rejected")}
                 disabled={approving}
-                className="h-7 text-xs border-destructive/30 text-destructive hover:bg-destructive/10"
+                className="h-8 text-xs border-destructive/30 text-destructive hover:bg-destructive/10 rounded-xl"
               >
                 Reject
               </Button>
@@ -184,7 +184,7 @@ export function ToolCard({ toolRun, conversationId }: Props) {
                 size="sm"
                 onClick={() => handleApproval("approved")}
                 disabled={approving}
-                className="h-7 text-xs"
+                className="h-8 text-xs rounded-xl"
               >
                 {approving ? <Loader2 className="w-3 h-3 animate-spin" /> : "Approve"}
               </Button>

@@ -30,13 +30,13 @@ export function SessionControls({
   const isLoginSetup = session?.status === "login_setup";
 
   return (
-    <div className="p-4 space-y-3 border-b border-border">
+    <div className="p-4 space-y-3 border-b border-border glass-subtle">
       {!session ? (
         <div className="space-y-2">
           <Button
             onClick={() => onStart(false)}
             disabled={loading}
-            className="w-full gap-2"
+            className="w-full gap-2 rounded-xl"
             variant="default"
           >
             <Play className="w-4 h-4" />
@@ -45,7 +45,7 @@ export function SessionControls({
           <Button
             onClick={() => onStart(true)}
             disabled={loading}
-            className="w-full gap-2"
+            className="w-full gap-2 rounded-xl"
             variant="secondary"
           >
             <LogIn className="w-4 h-4" />
@@ -71,7 +71,7 @@ export function SessionControls({
           </div>
 
           {isLoginSetup && (
-            <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3 text-xs space-y-2">
+            <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-3 text-xs space-y-2 glass-subtle">
               <p className="font-medium text-amber-700">Login Setup Mode</p>
               <ol className="list-decimal list-inside space-y-1 text-muted-foreground">
                 <li>Click <strong>Take Over</strong> to open the live browser</li>
@@ -87,15 +87,15 @@ export function SessionControls({
               onClick={onTakeOver}
               variant={takeOver ? "destructive" : "secondary"}
               size="sm"
-              className="flex-1 gap-1"
+              className="flex-1 gap-1 rounded-xl"
             >
               <Monitor className="w-3 h-3" />
               {takeOver ? "Release" : "Take Over"}
             </Button>
-            <Button onClick={onRefreshScreenshot} variant="outline" size="sm">
+            <Button onClick={onRefreshScreenshot} variant="outline" size="sm" className="rounded-xl">
               <RefreshCw className="w-3 h-3" />
             </Button>
-            <Button onClick={onStop} variant="outline" size="sm">
+            <Button onClick={onStop} variant="outline" size="sm" className="rounded-xl">
               <Square className="w-3 h-3" />
             </Button>
           </div>
@@ -104,7 +104,7 @@ export function SessionControls({
             <div className="space-y-2">
               <Button
                 onClick={onConfirmLogin}
-                className="w-full gap-2"
+                className="w-full gap-2 rounded-xl"
                 variant="default"
               >
                 <CheckCircle className="w-4 h-4" />
@@ -112,7 +112,7 @@ export function SessionControls({
               </Button>
               <Button
                 onClick={onSaveSession}
-                className="w-full gap-2"
+                className="w-full gap-2 rounded-xl"
                 variant="secondary"
               >
                 <Save className="w-4 h-4" />

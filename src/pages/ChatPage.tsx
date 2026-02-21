@@ -48,7 +48,7 @@ export default function ChatPage() {
           variant="ghost"
           size="icon"
           onClick={() => setSidebarOpen(true)}
-          className="fixed top-3 left-3 z-50 md:hidden"
+          className="fixed top-3 left-3 z-50 md:hidden glass rounded-xl h-10 w-10"
         >
           <Menu className="w-5 h-5" />
         </Button>

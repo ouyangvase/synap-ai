@@ -2,10 +2,11 @@ import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { Button } from "@/components/ui/button";
-import { Plus, MessageSquare, LogOut, X, Bot, Monitor, Calendar, Trash2, Sparkles } from "lucide-react";
+import { Plus, MessageSquare, LogOut, X, Monitor, Calendar, Trash2, Sparkles } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { formatDistanceToNow } from "date-fns";
+import { ThemeToggle } from "@/components/ThemeToggle";
 
 interface Conversation {
   id: string;
@@ -38,11 +39,9 @@ export function ConversationSidebar({ activeId, onSelect, onNew, open, onClose }
 
   const handleDelete = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
-    // Delete messages first (FK constraint), then conversation
     await supabase.from("messages").delete().eq("conversation_id", id);
     await supabase.from("tool_runs").delete().eq("conversation_id", id);
     await supabase.from("conversations").delete().eq("id", id);
-    // If this was the active conversation, navigate away
     if (activeId === id) {
       navigate("/");
     }
@@ -71,31 +70,34 @@ export function ConversationSidebar({ activeId, onSelect, onNew, open, onClose }
       )}
     >
       {/* Header */}
-      <div className="flex items-center justify-between p-4 border-b border-sidebar-border">
-        <div className="flex items-center gap-2">
-          <Bot className="w-5 h-5 text-primary" />
-          <span className="font-semibold text-sm tracking-tight">AgentHub</span>
+      <div className="flex items-center justify-between p-4 border-b border-sidebar-border safe-top">
+        <div className="flex items-center gap-2.5">
+          <img src="/logo.png" alt="HahaRun" className="w-7 h-7 rounded-lg object-cover" />
+          <span className="font-semibold text-sm tracking-tight">HahaRun</span>
         </div>
-        <Button variant="ghost" size="icon" onClick={onClose} className="md:hidden h-7 w-7">
-          <X className="w-4 h-4" />
-        </Button>
+        <div className="flex items-center gap-1">
+          <ThemeToggle />
+          <Button variant="ghost" size="icon" onClick={onClose} className="md:hidden h-7 w-7">
+            <X className="w-4 h-4" />
+          </Button>
+        </div>
       </div>
 
-      {/* New chat */}
-      <div className="p-3">
-        <Button onClick={onNew} variant="outline" className="w-full justify-start gap-2 text-sm border-dashed">
+      {/* Navigation */}
+      <div className="p-3 space-y-1">
+        <Button onClick={onNew} variant="outline" className="w-full justify-start gap-2 text-sm border-dashed rounded-xl h-9">
           <Plus className="w-4 h-4" />
           New conversation
         </Button>
-        <Button onClick={() => navigate("/browser")} variant="outline" className="w-full justify-start gap-2 text-sm">
+        <Button onClick={() => navigate("/browser")} variant="ghost" className="w-full justify-start gap-2 text-sm rounded-xl h-9">
           <Monitor className="w-4 h-4" />
           Browser Agent
         </Button>
-        <Button onClick={() => navigate("/images")} variant="outline" className="w-full justify-start gap-2 text-sm">
+        <Button onClick={() => navigate("/images")} variant="ghost" className="w-full justify-start gap-2 text-sm rounded-xl h-9">
           <Sparkles className="w-4 h-4" />
           Image Generator
         </Button>
-        <Button onClick={() => navigate("/jobs")} variant="outline" className="w-full justify-start gap-2 text-sm">
+        <Button onClick={() => navigate("/jobs")} variant="ghost" className="w-full justify-start gap-2 text-sm rounded-xl h-9">
           <Calendar className="w-4 h-4" />
           Jobs & Automation
         </Button>
@@ -108,9 +110,9 @@ export function ConversationSidebar({ activeId, onSelect, onNew, open, onClose }
             key={c.id}
             onClick={() => onSelect(c.id)}
             className={cn(
-              "w-full text-left px-3 py-2.5 rounded-md text-sm transition-colors group relative",
+              "w-full text-left px-3 py-2.5 rounded-xl text-sm transition-colors group relative",
               activeId === c.id
-                ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                ? "bg-sidebar-accent text-sidebar-accent-foreground elevation-1"
                 : "text-sidebar-foreground hover:bg-sidebar-accent/50"
             )}
           >
@@ -124,7 +126,7 @@ export function ConversationSidebar({ activeId, onSelect, onNew, open, onClose }
             <span
               role="button"
               onClick={(e) => handleDelete(e, c.id)}
-              className="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-destructive/20 hover:text-destructive"
+              className="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-lg hover:bg-destructive/20 hover:text-destructive"
             >
               <Trash2 className="w-3.5 h-3.5" />
             </span>
@@ -133,12 +135,12 @@ export function ConversationSidebar({ activeId, onSelect, onNew, open, onClose }
       </div>
 
       {/* Footer */}
-      <div className="p-3 border-t border-sidebar-border">
+      <div className="p-3 border-t border-sidebar-border safe-bottom">
         <div className="flex items-center justify-between">
           <span className="text-xs text-muted-foreground truncate max-w-[180px]">
             {user?.email}
           </span>
-          <Button variant="ghost" size="icon" onClick={signOut} className="h-7 w-7">
+          <Button variant="ghost" size="icon" onClick={signOut} className="h-7 w-7 rounded-lg">
             <LogOut className="w-3.5 h-3.5" />
           </Button>
         </div>

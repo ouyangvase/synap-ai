@@ -444,8 +444,8 @@ export default function JobsPage() {
   return (
     <div className="flex h-screen bg-background text-foreground overflow-hidden">
       {/* ---- Left panel: Jobs list ---- */}
-      <div className="w-80 border-r border-border flex flex-col">
-        <div className="p-4 border-b border-border flex items-center gap-2">
+      <div className="w-80 border-r border-border glass-subtle flex flex-col">
+        <div className="p-4 border-b border-border glass-subtle flex items-center gap-2">
           <Button variant="ghost" size="icon" onClick={() => navigate("/")}>
             <ArrowLeft className="w-4 h-4" />
           </Button>
@@ -464,20 +464,22 @@ export default function JobsPage() {
             </div>
           ) : jobs.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full p-4 text-center gap-3">
-              <Settings className="w-10 h-10 text-muted-foreground/30" />
+              <div className="glass elevation-1 rounded-2xl p-6">
+                <Settings className="w-10 h-10 text-muted-foreground/30" />
+              </div>
               <p className="text-sm text-muted-foreground">No jobs yet.</p>
               <Button variant="outline" size="sm" onClick={() => setCreateDialogOpen(true)} className="gap-1.5">
                 <Plus className="w-3.5 h-3.5" /> Create your first job
               </Button>
             </div>
           ) : (
-            <div className="divide-y divide-border">
+            <div>
               {jobs.map((job) => (
                 <button
                   key={job.id}
                   onClick={() => handleSelectJob(job)}
-                  className={`w-full text-left p-3 hover:bg-muted/50 transition-colors ${
-                    selectedJob?.id === job.id ? "bg-muted" : ""
+                  className={`w-full text-left p-3 hover:bg-secondary/30 rounded-xl mx-1 mb-0.5 transition-colors ${
+                    selectedJob?.id === job.id ? "bg-secondary/50 elevation-1" : ""
                   }`}
                 >
                   <div className="flex items-center justify-between mb-1">
@@ -520,7 +522,7 @@ export default function JobsPage() {
         {selectedJob ? (
           <>
             {/* Header */}
-            <div className="p-4 border-b border-border">
+            <div className="p-4 border-b border-border glass-subtle">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
                   <div>
@@ -572,7 +574,7 @@ export default function JobsPage() {
 
             {/* Tabs */}
             <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col overflow-hidden">
-              <TabsList className="mx-4 mt-2 w-fit">
+              <TabsList className="mx-4 mt-2 w-fit glass rounded-xl">
                 <TabsTrigger value="settings" className="gap-1.5">
                   <Settings className="w-3.5 h-3.5" /> Settings
                 </TabsTrigger>
@@ -584,7 +586,7 @@ export default function JobsPage() {
               {/* ---- Settings Tab ---- */}
               <TabsContent value="settings" className="flex-1 overflow-y-auto p-4 space-y-6 mt-0">
                 {/* General */}
-                <Card>
+                <Card className="glass rounded-2xl elevation-1 border-0">
                   <CardHeader className="pb-3">
                     <CardTitle className="text-sm">General</CardTitle>
                   </CardHeader>
@@ -611,7 +613,7 @@ export default function JobsPage() {
                 </Card>
 
                 {/* Schedule */}
-                <Card>
+                <Card className="glass rounded-2xl elevation-1 border-0">
                   <CardHeader className="pb-3">
                     <CardTitle className="text-sm">Schedule</CardTitle>
                   </CardHeader>
@@ -673,7 +675,7 @@ export default function JobsPage() {
                 </Card>
 
                 {/* Task Configuration */}
-                <Card>
+                <Card className="glass rounded-2xl elevation-1 border-0">
                   <CardHeader className="pb-3">
                     <CardTitle className="text-sm">Task Configuration</CardTitle>
                   </CardHeader>
@@ -719,7 +721,7 @@ export default function JobsPage() {
                           <Label htmlFor="webhook-payload">Payload (JSON, optional)</Label>
                           <textarea
                             id="webhook-payload"
-                            className="w-full min-h-[80px] rounded-md border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            className="w-full min-h-[80px] rounded-xl border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                             value={editWebhookPayload}
                             onChange={(e) => setEditWebhookPayload(e.target.value)}
                             placeholder='{"key": "value"}'
@@ -729,7 +731,7 @@ export default function JobsPage() {
                     )}
 
                     {editTaskType === "browser_flow" && (
-                      <div className="rounded-md bg-muted/50 p-4 text-sm text-muted-foreground">
+                      <div className="rounded-xl glass-subtle p-4 text-sm text-muted-foreground">
                         Browser Flow automation is coming soon. You'll be able to define multi-step browser actions (navigate, fill forms, extract data) that run on a schedule.
                       </div>
                     )}
@@ -738,7 +740,7 @@ export default function JobsPage() {
 
                 {/* Save button */}
                 <div className="flex justify-end pb-4">
-                  <Button onClick={handleSave} disabled={savingJob} className="gap-1.5">
+                  <Button onClick={handleSave} disabled={savingJob} className="gap-1.5 rounded-xl">
                     {savingJob ? <Loader className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
                     Save Changes
                   </Button>
@@ -753,7 +755,9 @@ export default function JobsPage() {
                   </div>
                 ) : jobRuns.length === 0 ? (
                   <div className="flex flex-col items-center justify-center h-64 text-muted-foreground">
-                    <History className="w-10 h-10 mb-3 opacity-30" />
+                    <div className="glass elevation-1 rounded-2xl p-6">
+                      <History className="w-10 h-10 mb-3 opacity-30" />
+                    </div>
                     <p className="text-sm">No runs recorded yet.</p>
                     <Button
                       variant="outline"
@@ -768,7 +772,7 @@ export default function JobsPage() {
                 ) : (
                   <div className="space-y-3">
                     {jobRuns.map((run) => (
-                      <Card key={run.id} className="bg-card border-border">
+                      <Card key={run.id} className="bg-card border-border glass rounded-2xl elevation-1 border-0">
                         <CardHeader className="pb-2 pt-3 px-4">
                           <div className="flex items-center justify-between">
                             <CardTitle className="text-sm font-medium flex items-center gap-2">
@@ -795,7 +799,7 @@ export default function JobsPage() {
                           </div>
 
                           {run.error && (
-                            <div className="p-2 rounded bg-destructive/10 border border-destructive/20 mb-2">
+                            <div className="p-2 rounded-xl bg-destructive/10 border border-destructive/20 mb-2">
                               <p className="text-xs font-medium text-destructive flex items-center gap-1 mb-1">
                                 <XCircle className="w-3 h-3" /> Error
                               </p>
@@ -806,7 +810,7 @@ export default function JobsPage() {
                           )}
 
                           {run.output && (
-                            <div className="p-2 rounded bg-muted/50 border border-border">
+                            <div className="p-2 rounded-xl glass-subtle border border-border">
                               <p className="text-xs font-medium text-muted-foreground flex items-center gap-1 mb-1">
                                 <CheckCircle className="w-3 h-3" /> Output
                               </p>
@@ -827,7 +831,9 @@ export default function JobsPage() {
           </>
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground">
-            <Settings className="w-12 h-12 mb-4 opacity-20" />
+            <div className="glass elevation-1 rounded-2xl p-6">
+              <Settings className="w-12 h-12 mb-4 opacity-20" />
+            </div>
             <p className="text-sm">Select a job to configure or view its history.</p>
             <Button
               variant="outline"
@@ -843,7 +849,7 @@ export default function JobsPage() {
 
       {/* ---- Create Job Dialog ---- */}
       <Dialog open={createDialogOpen} onOpenChange={setCreateDialogOpen}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="sm:max-w-md glass-strong rounded-2xl">
           <DialogHeader>
             <DialogTitle>Create New Job</DialogTitle>
           </DialogHeader>
@@ -872,15 +878,15 @@ export default function JobsPage() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setCreateDialogOpen(false)}>Cancel</Button>
-            <Button onClick={handleCreate} disabled={!newName.trim()}>Create</Button>
+            <Button variant="outline" onClick={() => setCreateDialogOpen(false)} className="rounded-xl">Cancel</Button>
+            <Button onClick={handleCreate} disabled={!newName.trim()} className="rounded-xl">Create</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
       {/* ---- Delete Confirmation Dialog ---- */}
       <Dialog open={!!deleteConfirmId} onOpenChange={() => setDeleteConfirmId(null)}>
-        <DialogContent className="sm:max-w-sm">
+        <DialogContent className="sm:max-w-sm glass-strong rounded-2xl">
           <DialogHeader>
             <DialogTitle>Delete Job</DialogTitle>
           </DialogHeader>
@@ -888,8 +894,8 @@ export default function JobsPage() {
             This will permanently delete the job and all its run history. This action cannot be undone.
           </p>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteConfirmId(null)}>Cancel</Button>
-            <Button variant="destructive" onClick={() => deleteConfirmId && handleDelete(deleteConfirmId)}>
+            <Button variant="outline" onClick={() => setDeleteConfirmId(null)} className="rounded-xl">Cancel</Button>
+            <Button variant="destructive" onClick={() => deleteConfirmId && handleDelete(deleteConfirmId)} className="rounded-xl">
               Delete
             </Button>
           </DialogFooter>

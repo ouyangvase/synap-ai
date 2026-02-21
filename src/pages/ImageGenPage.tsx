@@ -136,8 +136,8 @@ export default function ImageGenPage() {
   return (
     <div className="flex h-screen bg-background text-foreground overflow-hidden">
       {/* Left: Controls + History */}
-      <div className="w-80 border-r border-border flex flex-col">
-        <div className="p-4 border-b border-border flex items-center gap-2">
+      <div className="w-80 border-r border-border glass-subtle flex flex-col">
+        <div className="p-4 border-b border-border glass-subtle flex items-center gap-2">
           <Button variant="ghost" size="icon" onClick={() => navigate("/")}>
             <ArrowLeft className="w-4 h-4" />
           </Button>
@@ -147,7 +147,7 @@ export default function ImageGenPage() {
         </div>
 
         {/* Generation form */}
-        <div className="p-4 space-y-3 border-b border-border">
+        <div className="p-4 space-y-3 border-b border-border glass-subtle">
           <div>
             <label className="text-xs text-muted-foreground mb-1 block">Prompt</label>
             <Input
@@ -155,7 +155,7 @@ export default function ImageGenPage() {
               onChange={(e) => setPrompt(e.target.value)}
               placeholder="A futuristic city at sunset..."
               disabled={loading}
-              className="bg-secondary border-border"
+              className="bg-secondary border-border rounded-xl"
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
@@ -169,7 +169,7 @@ export default function ImageGenPage() {
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">Style</label>
               <Select value={style} onValueChange={setStyle}>
-                <SelectTrigger className="bg-secondary border-border text-xs">
+                <SelectTrigger className="bg-secondary border-border text-xs rounded-xl">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -187,7 +187,7 @@ export default function ImageGenPage() {
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">Ratio</label>
               <Select value={aspectRatio} onValueChange={setAspectRatio}>
-                <SelectTrigger className="bg-secondary border-border text-xs">
+                <SelectTrigger className="bg-secondary border-border text-xs rounded-xl">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -204,7 +204,7 @@ export default function ImageGenPage() {
           <Button
             onClick={handleGenerate}
             disabled={loading || !prompt.trim()}
-            className="w-full gap-2"
+            className="w-full gap-2 rounded-xl"
           >
             {loading ? (
               <>
@@ -232,10 +232,10 @@ export default function ImageGenPage() {
             <button
               key={gen.id}
               onClick={() => setSelectedImage(gen)}
-              className={`w-full text-left px-3 py-2 rounded-md text-sm transition-colors group relative ${
+              className={`w-full text-left px-3 py-2 rounded-xl text-sm transition-colors group relative ${
                 selectedImage?.id === gen.id
-                  ? "bg-accent text-accent-foreground"
-                  : "hover:bg-accent/50"
+                  ? "bg-secondary/50 elevation-1 text-accent-foreground"
+                  : "hover:bg-secondary/30"
               }`}
             >
               <div className="flex items-center gap-2">
@@ -256,7 +256,7 @@ export default function ImageGenPage() {
               <span
                 role="button"
                 onClick={(e) => handleDelete(e, gen.id)}
-                className="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-destructive/20 hover:text-destructive"
+                className="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-xl hover:bg-destructive/20 hover:text-destructive"
               >
                 <Trash2 className="w-3 h-3" />
               </span>
@@ -269,7 +269,7 @@ export default function ImageGenPage() {
       <div className="flex-1 flex flex-col">
         {selectedImage?.image_url ? (
           <>
-            <div className="flex items-center justify-between px-4 py-2 border-b border-border bg-muted/30">
+            <div className="flex items-center justify-between px-4 py-2 border-b border-border glass-subtle">
               <div className="flex-1 min-w-0">
                 <p className="text-sm truncate">{selectedImage.prompt}</p>
                 <p className="text-xs text-muted-foreground">
@@ -280,7 +280,7 @@ export default function ImageGenPage() {
               <Button
                 variant="outline"
                 size="sm"
-                className="gap-1 ml-2 shrink-0"
+                className="gap-1 ml-2 shrink-0 rounded-xl"
                 onClick={() =>
                   handleDownload(selectedImage.image_url!, selectedImage.prompt)
                 }
@@ -289,17 +289,18 @@ export default function ImageGenPage() {
                 Download
               </Button>
             </div>
-            <div className="flex-1 flex items-center justify-center p-4 bg-muted/10 overflow-auto">
+            <div className="flex-1 flex items-center justify-center p-4 overflow-auto">
               <img
                 src={selectedImage.image_url}
                 alt={selectedImage.prompt}
-                className="max-w-full max-h-full object-contain rounded-lg shadow-lg"
+                className="max-w-full max-h-full object-contain elevation-2 rounded-2xl"
               />
             </div>
           </>
         ) : (
           <div className="flex-1 flex items-center justify-center">
-            <div className="text-center space-y-4">
+            <div className="glass elevation-1 rounded-2xl p-8">
+              <div className="text-center space-y-4">
               <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl bg-primary/5">
                 <Sparkles className="w-10 h-10 text-primary/40" />
               </div>
@@ -308,6 +309,7 @@ export default function ImageGenPage() {
                 <p className="text-sm text-muted-foreground max-w-sm">
                   Describe what you want to see and the AI will create it. Try different styles and aspect ratios.
                 </p>
+              </div>
               </div>
             </div>
           </div>
