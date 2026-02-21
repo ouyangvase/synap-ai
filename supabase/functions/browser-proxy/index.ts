@@ -237,9 +237,14 @@ Deno.serve(async (req) => {
   // ──────────────────────────────────────────────
   // POST /agent-action — Unified endpoint for AI agent browser tool calls.
   // Called by the chat edge function (service-to-service), no user auth needed.
-  // Routes tool_name to the appropriate Browserless action.
-  // Manages session state via conversation_id metadata.
-  // Accepts: { input: {...}, meta: { tool_name, conversation_id, user_id, ... } }
+  //
+  // Supports two tools:
+  //   1. browser_do — Execute a multi-step browser script in a single ephemeral
+  //      browser instance. Steps run in sequence within the same page context,
+  //      preserving cookies, localStorage, and DOM state.
+  //   2. web_browse — Simple page text extraction (already handled by /browse).
+  //
+  // Accepts: { input: {...}, meta: { tool_name, conversation_id, user_id } }
   // ──────────────────────────────────────────────
   if (path === "/agent-action" && req.method === "POST") {
     if (!rawUrl) {
@@ -252,235 +257,78 @@ Deno.serve(async (req) => {
       return jsonResp({ error: "Invalid BROWSER_SERVICE_URL" }, 500);
     }
 
-    const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey);
-
     let body: Record<string, unknown> = {};
     try { body = await req.json(); } catch {}
     const input = (body.input as Record<string, unknown>) || {};
     const meta = (body.meta as Record<string, unknown>) || {};
     const toolName = (meta.tool_name as string) || "";
-    const conversationId = (meta.conversation_id as string) || "";
-    const userId = (meta.user_id as string) || "";
 
     try {
-      // ── browser_start ──
-      if (toolName === "browser_start") {
-        const startUrl = (input.url as string) || "about:blank";
-        const wsEndpoint = bl.connectWs;
-        const liveUrl = `${bl.baseUrl}/live?token=${bl.token}`;
+      // ── browser_do: Multi-step browser automation ──
+      // The AI sends a JSON array of steps that execute within a single browser.
+      // Steps: navigate, click, type, select, scroll, wait, extract, screenshot
+      if (toolName === "browser_do") {
+        const steps = (input.steps as Array<Record<string, unknown>>) || [];
+        const url = (input.url as string) || "";
 
-        let initialTitle: string | null = null;
-        if (startUrl !== "about:blank") {
-          try {
-            const nav = await executeBrowserlessAction(bl, "navigate", { url: startUrl }, null);
-            if (nav.success && nav.data) {
-              initialTitle = (nav.data as Record<string, unknown>).title as string || null;
-            }
-          } catch {}
+        if (!url && steps.length === 0) {
+          return jsonResp({ error: "Either 'url' or 'steps' is required", markdown_content: "Error: provide a url or steps array." }, 400);
         }
 
-        // Store session
-        const { data: dbSession, error: dbErr } = await supabaseAdmin
-          .from("browser_sessions")
-          .insert({
-            user_id: userId || null,
-            status: "running",
-            vnc_url: liveUrl,
-            playwright_url: wsEndpoint,
-            metadata: {
-              conversation_id: conversationId,
-              agent_controlled: true,
-              ws_endpoint: wsEndpoint,
-              current_url: startUrl !== "about:blank" ? startUrl : null,
-              initial_title: initialTitle,
-              started_at: new Date().toISOString(),
-            },
-          })
-          .select()
-          .single();
+        // Build a single Puppeteer script that runs all steps
+        const script = buildCompositeScript(url, steps);
 
-        if (dbErr) return jsonResp({ error: `Failed to create session: ${dbErr.message}` }, 500);
+        const resp = await fetchWithTimeout(
+          `${bl.baseUrl}/function?token=${bl.token}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/javascript" },
+            body: script,
+            timeout: 55_000,
+          },
+        );
 
-        return jsonResp({
-          session_id: dbSession.id,
-          live_url: liveUrl,
-          status: "running",
-          current_url: startUrl !== "about:blank" ? startUrl : null,
-          title: initialTitle,
-          markdown_content: `Browser session started.${startUrl !== "about:blank" ? ` Navigated to ${startUrl}.` : ""}\n\nSession ID: ${dbSession.id}\nLive View: ${liveUrl}\n\nThe user can watch the browser in the live view panel.`,
-        });
-      }
-
-      // ── For all other tools, find the active session for this conversation ──
-      let sessionId: string | null = null;
-      let sessionMeta: Record<string, unknown> = {};
-
-      if (conversationId) {
-        const { data: sessions } = await supabaseAdmin
-          .from("browser_sessions")
-          .select("id, metadata, status")
-          .eq("status", "running")
-          .order("created_at", { ascending: false })
-          .limit(10);
-
-        // Find session for this conversation
-        const match = sessions?.find((s: any) => {
-          const m = s.metadata as Record<string, unknown>;
-          return m?.conversation_id === conversationId;
-        });
-        if (match) {
-          sessionId = match.id;
-          sessionMeta = (match.metadata as Record<string, unknown>) || {};
+        if (!resp.ok) {
+          const errText = await resp.text();
+          return jsonResp({
+            error: `Browser action failed (${resp.status})`,
+            detail: errText.slice(0, 500),
+            markdown_content: `Browser action failed: ${errText.slice(0, 300)}`,
+          }, 502);
         }
-      }
 
-      if (!sessionId && toolName !== "browser_stop") {
-        return jsonResp({
-          error: "No active browser session. Call browser_start first.",
-          markdown_content: "Error: No active browser session found. Please call browser_start first to create a session.",
-        }, 400);
-      }
-
-      const currentUrl = (sessionMeta.current_url as string) || null;
-
-      // ── browser_stop ──
-      if (toolName === "browser_stop") {
-        if (sessionId) {
-          await supabaseAdmin
-            .from("browser_sessions")
-            .update({ status: "stopped", stopped_at: new Date().toISOString() })
-            .eq("id", sessionId);
+        const contentType = resp.headers.get("content-type") || "";
+        let result: Record<string, unknown> = {};
+        if (contentType.includes("application/json")) {
+          const raw = await resp.json();
+          result = raw.data || raw.result || raw;
+        } else {
+          const text = await resp.text();
+          result = { raw_text: text.substring(0, 10000) };
         }
-        return jsonResp({
-          stopped: true,
-          markdown_content: "Browser session closed.",
-        });
-      }
 
-      // ── browser_navigate ──
-      if (toolName === "browser_navigate") {
-        const targetUrl = (input.url as string) || "";
-        if (!targetUrl) return jsonResp({ error: "url is required" }, 400);
+        const extractedContent = (result.content as string) || "";
+        const pageTitle = (result.title as string) || "";
+        const pageUrl = (result.url as string) || url;
+        const screenshot = (result.screenshot as string) || null;
+        const stepResults = (result.step_results as string[]) || [];
 
-        const result = await executeBrowserlessAction(bl, "navigate", { url: targetUrl }, null);
-        const data = result.data as Record<string, unknown> || {};
-
-        // Update session URL
-        await supabaseAdmin.from("browser_sessions").update({
-          metadata: { ...sessionMeta, current_url: data.url || targetUrl, last_action_at: new Date().toISOString() }
-        }).eq("id", sessionId);
+        let markdown = `# ${pageTitle || pageUrl}\n\nFinal URL: ${pageUrl}\n`;
+        if (stepResults.length > 0) {
+          markdown += `\nSteps completed:\n${stepResults.map((s: string, i: number) => `${i + 1}. ${s}`).join("\n")}\n`;
+        }
+        if (extractedContent) {
+          markdown += `\nPage content:\n${extractedContent.substring(0, 8000)}`;
+        }
 
         return jsonResp({
-          ...data,
-          success: result.success,
-          markdown_content: result.success
-            ? `Navigated to ${data.url || targetUrl}. Page title: "${data.title || "unknown"}".`
-            : `Failed to navigate: ${result.error}`,
-        });
-      }
-
-      // ── browser_click ──
-      if (toolName === "browser_click") {
-        const result = await executeBrowserlessAction(bl, "click", input, currentUrl);
-        const data = result.data as Record<string, unknown> || {};
-
-        await supabaseAdmin.from("browser_sessions").update({
-          metadata: { ...sessionMeta, current_url: data.url || result.final_url || currentUrl, last_action_at: new Date().toISOString() }
-        }).eq("id", sessionId);
-
-        return jsonResp({
-          ...data,
-          success: result.success,
-          markdown_content: result.success
-            ? `Clicked "${input.selector}". Page is now at: ${data.url || result.final_url || currentUrl}.`
-            : `Failed to click: ${result.error}`,
-        });
-      }
-
-      // ── browser_type ──
-      if (toolName === "browser_type") {
-        const result = await executeBrowserlessAction(bl, "type", input, currentUrl);
-        const data = result.data as Record<string, unknown> || {};
-
-        return jsonResp({
-          ...data,
-          success: result.success,
-          markdown_content: result.success
-            ? `Typed text into "${input.selector}".`
-            : `Failed to type: ${result.error}`,
-        });
-      }
-
-      // ── browser_screenshot ──
-      if (toolName === "browser_screenshot") {
-        const result = await executeBrowserlessAction(bl, "screenshot", input, currentUrl);
-        const data = result.data as Record<string, unknown> || {};
-
-        return jsonResp({
-          ...data,
-          success: result.success,
-          has_screenshot: !!(data.screenshot),
-          markdown_content: result.success
-            ? `Screenshot taken of ${currentUrl || "current page"}. Title: "${data.title || ""}".`
-            : `Failed to take screenshot: ${result.error}`,
-        });
-      }
-
-      // ── browser_extract ──
-      if (toolName === "browser_extract") {
-        const selector = (input.selector as string) || "body";
-        const result = await executeBrowserlessAction(bl, "extract", { selector }, currentUrl);
-        const data = result.data as Record<string, unknown> || {};
-        const content = ((data.content as string) || "").substring(0, 8000);
-
-        return jsonResp({
-          content,
-          title: data.title || "",
-          url: data.url || currentUrl || "",
-          success: result.success,
-          markdown_content: result.success
-            ? `# ${data.title || currentUrl}\n\nExtracted from: ${data.url || currentUrl}\n\n${content || "(no content)"}`
-            : `Failed to extract: ${result.error}`,
-        });
-      }
-
-      // ── browser_scroll ──
-      if (toolName === "browser_scroll") {
-        const result = await executeBrowserlessAction(bl, "scroll", input, currentUrl);
-        const data = result.data as Record<string, unknown> || {};
-
-        return jsonResp({
-          ...data,
-          success: result.success,
-          markdown_content: result.success
-            ? `Scrolled ${input.direction || "down"} ${input.amount || 500}px.`
-            : `Failed to scroll: ${result.error}`,
-        });
-      }
-
-      // ── browser_select ──
-      if (toolName === "browser_select") {
-        const result = await executeBrowserlessAction(bl, "select", input, currentUrl);
-        const data = result.data as Record<string, unknown> || {};
-
-        return jsonResp({
-          ...data,
-          success: result.success,
-          markdown_content: result.success
-            ? `Selected "${input.value}" in "${input.selector}".`
-            : `Failed to select: ${result.error}`,
-        });
-      }
-
-      // ── browser_wait_for_user ──
-      if (toolName === "browser_wait_for_user") {
-        const liveUrl = `${bl.baseUrl}/live?token=${bl.token}`;
-        return jsonResp({
-          waiting: true,
-          instruction: input.instruction,
-          live_url: liveUrl,
-          session_id: sessionId,
-          markdown_content: `Waiting for user action: ${input.instruction}\n\nPlease use the live browser view to complete this step, then approve to continue.`,
+          success: true,
+          title: pageTitle,
+          url: pageUrl,
+          content: extractedContent.substring(0, 8000),
+          screenshot: screenshot ? screenshot.substring(0, 100000) : null,
+          step_results: stepResults,
+          markdown_content: markdown,
         });
       }
 
@@ -1030,6 +878,175 @@ Deno.serve(async (req) => {
 // ═══════════════════════════════════════════════════════
 // Browserless /function execution with reconnect pattern
 // ═══════════════════════════════════════════════════════
+
+/**
+ * Build a single Puppeteer script that navigates to a URL then runs
+ * a sequence of steps (click, type, select, scroll, wait, extract, screenshot)
+ * all within the SAME browser context — preserving cookies, localStorage,
+ * and DOM state between steps.
+ *
+ * This solves the ephemeral-session problem where each /function call
+ * creates a new browser: by combining all steps into one script.
+ */
+function buildCompositeScript(
+  startUrl: string,
+  steps: Array<Record<string, unknown>>,
+): string {
+  // Build step code from the array
+  const stepCode: string[] = [];
+
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    const action = (step.action as string) || "";
+    const selector = JSON.stringify((step.selector as string) || "body");
+    const text = JSON.stringify((step.text as string) || "");
+    const value = JSON.stringify((step.value as string) || "");
+    const url = JSON.stringify((step.url as string) || "");
+    const ms = Number(step.ms) || 2000;
+    const direction = (step.direction as string) || "down";
+    const amount = Number(step.amount) || 500;
+
+    switch (action) {
+      case "navigate":
+        stepCode.push(`
+          await page.goto(${url}, { waitUntil: "networkidle2", timeout: 30000 });
+          stepResults.push("Navigated to " + ${url});
+        `);
+        break;
+
+      case "click":
+        stepCode.push(`
+          try {
+            await page.waitForSelector(${selector}, { timeout: 10000 });
+            await page.click(${selector});
+            await new Promise(r => setTimeout(r, 1000));
+            await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 8000 }).catch(() => {});
+            stepResults.push("Clicked " + ${selector});
+          } catch(e) { stepResults.push("Click failed on " + ${selector} + ": " + e.message); }
+        `);
+        break;
+
+      case "type":
+        stepCode.push(`
+          try {
+            await page.waitForSelector(${selector}, { timeout: 10000 });
+            ${step.clear ? `await page.click(${selector}, { clickCount: 3 }); await page.keyboard.press("Backspace");` : ""}
+            await page.type(${selector}, ${text}, { delay: 50 });
+            stepResults.push("Typed into " + ${selector});
+          } catch(e) { stepResults.push("Type failed on " + ${selector} + ": " + e.message); }
+        `);
+        break;
+
+      case "select":
+        stepCode.push(`
+          try {
+            await page.waitForSelector(${selector}, { timeout: 10000 });
+            await page.select(${selector}, ${value});
+            stepResults.push("Selected " + ${value} + " in " + ${selector});
+          } catch(e) { stepResults.push("Select failed: " + e.message); }
+        `);
+        break;
+
+      case "scroll":
+        stepCode.push(`
+          await page.evaluate((dir, px) => {
+            if (dir === "down") window.scrollBy(0, px);
+            else if (dir === "up") window.scrollBy(0, -px);
+          }, "${direction}", ${amount});
+          stepResults.push("Scrolled ${direction} ${amount}px");
+        `);
+        break;
+
+      case "wait":
+        stepCode.push(`
+          await new Promise(r => setTimeout(r, ${ms}));
+          stepResults.push("Waited ${ms}ms");
+        `);
+        break;
+
+      case "press":
+        stepCode.push(`
+          await page.keyboard.press(${JSON.stringify((step.key as string) || "Enter")});
+          await new Promise(r => setTimeout(r, 500));
+          stepResults.push("Pressed key " + ${JSON.stringify((step.key as string) || "Enter")});
+        `);
+        break;
+
+      case "screenshot":
+        stepCode.push(`
+          takeScreenshot = true;
+          stepResults.push("Screenshot taken");
+        `);
+        break;
+
+      case "extract":
+        stepCode.push(`
+          try {
+            await page.waitForSelector(${selector}, { timeout: 10000 }).catch(() => {});
+            const extracted = await page.evaluate((sel) => {
+              const el = document.querySelector(sel);
+              return el ? el.innerText : null;
+            }, ${selector});
+            if (extracted) extractedContent = extracted;
+            stepResults.push("Extracted content from " + ${selector});
+          } catch(e) { stepResults.push("Extract failed: " + e.message); }
+        `);
+        break;
+
+      default:
+        stepCode.push(`stepResults.push("Unknown action: ${action}");`);
+    }
+  }
+
+  return `export default async function ({ page }) {
+    const stepResults = [];
+    let extractedContent = "";
+    let takeScreenshot = false;
+
+    // Navigate to start URL
+    ${startUrl ? `
+    await page.goto(${JSON.stringify(startUrl)}, { waitUntil: "networkidle2", timeout: 30000 });
+    stepResults.push("Navigated to " + ${JSON.stringify(startUrl)});
+    ` : ""}
+
+    // Execute steps
+    ${stepCode.join("\n")}
+
+    // Always extract page content if not explicitly extracted
+    if (!extractedContent) {
+      try {
+        const remove = document.querySelectorAll ? null : null;
+        extractedContent = await page.evaluate(() => {
+          const rm = document.querySelectorAll("script, style, nav, footer, header, aside, [role=navigation], [role=banner]");
+          rm.forEach(el => el.remove());
+          return document.body ? document.body.innerText.substring(0, 10000) : "";
+        });
+      } catch {}
+    }
+
+    // Take screenshot if requested
+    let screenshot = null;
+    if (takeScreenshot) {
+      try {
+        screenshot = await page.screenshot({ encoding: "base64", fullPage: false });
+      } catch {}
+    }
+
+    const title = await page.title();
+    const finalUrl = page.url();
+
+    return {
+      data: {
+        title,
+        url: finalUrl,
+        content: extractedContent.substring(0, 10000),
+        screenshot,
+        step_results: stepResults,
+      },
+      type: "application/json",
+    };
+  }`;
+}
 
 interface ActionResult {
   success: boolean;

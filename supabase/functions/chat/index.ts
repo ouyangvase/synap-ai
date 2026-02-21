@@ -306,16 +306,8 @@ serve(async (req) => {
                 ...toolResultMessages,
               ];
 
-              // Save tool result messages to DB
-              for (const trm of toolResultMessages) {
-                await supabase.from("messages").insert({
-                  conversation_id,
-                  user_id: user.id,
-                  role: "tool",
-                  content: trm.content,
-                  tool_call_id: trm.tool_call_id,
-                });
-              }
+              // NOTE: tool result messages are already saved to DB by executeToolRun.
+              // Do NOT insert them again here to avoid duplicates.
 
               const followUpBody: any = {
                 model,
