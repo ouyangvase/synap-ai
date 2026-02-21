@@ -26,6 +26,10 @@ interface BrowserAction {
   result: unknown;
   screenshot_url: string | null;
   error: string | null;
+  error_class: string | null;
+  healing_attempts: number;
+  healing_log: Array<Record<string, unknown>>;
+  original_parameters: Record<string, unknown> | null;
   created_at: string;
 }
 

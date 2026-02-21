@@ -92,6 +92,10 @@ export type Database = {
           completed_at: string | null
           created_at: string
           error: string | null
+          error_class: string | null
+          healing_attempts: number
+          healing_log: Json
+          original_parameters: Json | null
           id: string
           parameters: Json
           result: Json | null
@@ -106,6 +110,10 @@ export type Database = {
           completed_at?: string | null
           created_at?: string
           error?: string | null
+          error_class?: string | null
+          healing_attempts?: number
+          healing_log?: Json
+          original_parameters?: Json | null
           id?: string
           parameters?: Json
           result?: Json | null
@@ -120,6 +128,10 @@ export type Database = {
           completed_at?: string | null
           created_at?: string
           error?: string | null
+          error_class?: string | null
+          healing_attempts?: number
+          healing_log?: Json
+          original_parameters?: Json | null
           id?: string
           parameters?: Json
           result?: Json | null
@@ -279,6 +291,8 @@ export type Database = {
           completed_at: string | null
           created_at: string
           description: string
+          execution_phase: string | null
+          error_class: string | null
           id: string
           result: Json | null
           session_id: string
@@ -290,6 +304,8 @@ export type Database = {
           completed_at?: string | null
           created_at?: string
           description: string
+          execution_phase?: string | null
+          error_class?: string | null
           id?: string
           result?: Json | null
           session_id: string
@@ -301,6 +317,8 @@ export type Database = {
           completed_at?: string | null
           created_at?: string
           description?: string
+          execution_phase?: string | null
+          error_class?: string | null
           id?: string
           result?: Json | null
           session_id?: string
@@ -314,6 +332,84 @@ export type Database = {
             columns: ["session_id"]
             isOneToOne: false
             referencedRelation: "browser_sessions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      execution_state: {
+        Row: {
+          id: string
+          job_run_id: string | null
+          browser_task_id: string | null
+          status: string
+          current_step: number
+          total_steps: number
+          execution_phase: string | null
+          retry_count: number
+          max_retries: number
+          last_error: string | null
+          last_error_class: string | null
+          resume_token: Json
+          execution_log: Json
+          healing_log: Json
+          created_at: string
+          updated_at: string
+          started_at: string | null
+          completed_at: string | null
+        }
+        Insert: {
+          id?: string
+          job_run_id?: string | null
+          browser_task_id?: string | null
+          status?: string
+          current_step?: number
+          total_steps?: number
+          execution_phase?: string | null
+          retry_count?: number
+          max_retries?: number
+          last_error?: string | null
+          last_error_class?: string | null
+          resume_token?: Json
+          execution_log?: Json
+          healing_log?: Json
+          created_at?: string
+          updated_at?: string
+          started_at?: string | null
+          completed_at?: string | null
+        }
+        Update: {
+          id?: string
+          job_run_id?: string | null
+          browser_task_id?: string | null
+          status?: string
+          current_step?: number
+          total_steps?: number
+          execution_phase?: string | null
+          retry_count?: number
+          max_retries?: number
+          last_error?: string | null
+          last_error_class?: string | null
+          resume_token?: Json
+          execution_log?: Json
+          healing_log?: Json
+          created_at?: string
+          updated_at?: string
+          started_at?: string | null
+          completed_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "execution_state_job_run_id_fkey"
+            columns: ["job_run_id"]
+            isOneToOne: true
+            referencedRelation: "job_runs"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "execution_state_browser_task_id_fkey"
+            columns: ["browser_task_id"]
+            isOneToOne: true
+            referencedRelation: "browser_tasks"
             referencedColumns: ["id"]
           },
         ]

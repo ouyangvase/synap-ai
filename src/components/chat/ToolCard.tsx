@@ -158,6 +158,38 @@ export function ToolCard({ toolRun, conversationId }: Props) {
               </div>
             )}
 
+            {/* Error Classification + Healing (from output) */}
+            {output && (output as any).error_class && (
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-amber-500 mb-1">Error Classification</p>
+                <Badge variant="outline" className="text-[10px] text-amber-500 border-amber-500/30">
+                  {(output as any).error_class}
+                </Badge>
+              </div>
+            )}
+            {output && (output as any).healing_applied && (
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-amber-500 mb-1 flex items-center gap-1">
+                  <Wrench className="w-3 h-3" /> Self-Healing Applied
+                </p>
+                <div className="text-xs bg-amber-500/5 rounded-xl p-2 border border-amber-500/10">
+                  {((output as any).healing_log || []).map((entry: Record<string, unknown>, i: number) => (
+                    <div key={i} className="flex items-center gap-2 text-[10px]">
+                      <span className="text-muted-foreground">
+                        Strategy: {(entry.strategy as string) || "diagnosis"}
+                      </span>
+                      {entry.new_selector && (
+                        <code className="text-amber-600">{entry.original_selector as string} → {entry.new_selector as string}</code>
+                      )}
+                      <Badge variant="outline" className={cn("text-[10px]", entry.healed ? "text-emerald-500 border-emerald-500/30" : "text-red-400 border-red-400/30")}>
+                        {entry.healed ? "Healed" : "Failed"}
+                      </Badge>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Timestamps */}
             <div className="flex gap-4 text-[10px] text-muted-foreground">
               {toolRun.started_at && <span>Started: {new Date(toolRun.started_at).toLocaleTimeString()}</span>}

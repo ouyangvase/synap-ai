@@ -14,3 +14,9 @@ verify_jwt = false
 
 [functions.daily-cron]
 verify_jwt = false
+
+[functions.jobs-run]
+verify_jwt = false
+
+[functions.jobs-resume]
+verify_jwt = false

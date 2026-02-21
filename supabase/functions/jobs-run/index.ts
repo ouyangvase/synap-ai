@@ -43,20 +43,132 @@ interface Job {
   daily_time: string;
   timezone: string;
   cron_expr: string | null;
+  steps: Array<{ action: string; parameters: Record<string, unknown>; phase: string; max_retries?: number; timeout_ms?: number }>;
 }
 
 interface JobResult {
   job_id: string;
   job_name: string;
-  status: "success" | "skipped" | "failed";
+  status: "success" | "skipped" | "failed" | "waiting_for_login" | "waiting_for_approval" | "paused";
   reason?: string;
   error?: string;
+  error_class?: string;
   duration_ms?: number;
+}
+
+interface StepResult {
+  step: number;
+  phase: string;
+  action: string;
+  status: "completed" | "failed" | "skipped";
+  result?: unknown;
+  error?: string;
+  error_class?: string;
+  healing_attempts?: number;
+  started_at: string;
+  completed_at: string;
+  duration_ms: number;
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Classify errors for state machine transitions.
+ */
+function classifyBrowserError(error: string, url?: string): { error_class: string; is_recoverable: boolean } {
+  const lower = error.toLowerCase();
+  const urlLower = (url || "").toLowerCase();
+
+  if (urlLower.includes("/login") || urlLower.includes("/signin") || urlLower.includes("/auth")) {
+    return { error_class: "login_required", is_recoverable: false };
+  }
+  if (lower.includes("captcha") || lower.includes("recaptcha") || lower.includes("hcaptcha")) {
+    return { error_class: "captcha_detected", is_recoverable: false };
+  }
+  if (lower.includes("session expired") || lower.includes("sign in to continue")) {
+    return { error_class: "session_expired", is_recoverable: true };
+  }
+  if (lower.includes("timeout")) {
+    return { error_class: "navigation_timeout", is_recoverable: true };
+  }
+  if (lower.includes("element not found") || lower.includes("waiting for selector")) {
+    return { error_class: "element_not_found", is_recoverable: true };
+  }
+  return { error_class: "unknown", is_recoverable: false };
+}
+
+// ── Execution State Helpers ──
+
+async function initExecutionState(
+  supabase: ReturnType<typeof createClient>,
+  jobRunId: string,
+  steps: Job["steps"],
+  maxRetries: number,
+): Promise<string> {
+  const { data, error } = await supabase
+    .from("execution_state")
+    .insert({
+      job_run_id: jobRunId,
+      status: "created",
+      total_steps: steps.length,
+      max_retries: maxRetries,
+      resume_token: { steps },
+    })
+    .select("id")
+    .single();
+  if (error) throw new Error(`Failed to create execution state: ${error.message}`);
+  return data.id;
+}
+
+async function getExecutionState(supabase: ReturnType<typeof createClient>, jobRunId: string) {
+  const { data } = await supabase
+    .from("execution_state")
+    .select("*")
+    .eq("job_run_id", jobRunId)
+    .maybeSingle();
+  return data;
+}
+
+async function updateExecutionState(
+  supabase: ReturnType<typeof createClient>,
+  executionStateId: string,
+  updates: Record<string, unknown>,
+) {
+  await supabase.from("execution_state").update(updates).eq("id", executionStateId);
+}
+
+async function appendStepResult(
+  supabase: ReturnType<typeof createClient>,
+  executionStateId: string,
+  stepResult: StepResult,
+  newStatus: string,
+  newStep: number,
+) {
+  const { data: current } = await supabase
+    .from("execution_state")
+    .select("execution_log")
+    .eq("id", executionStateId)
+    .single();
+
+  const log = ((current?.execution_log as StepResult[]) || []);
+  log.push(stepResult);
+
+  await supabase
+    .from("execution_state")
+    .update({
+      execution_log: log,
+      current_step: newStep,
+      status: newStatus,
+      last_error: stepResult.error || null,
+      last_error_class: stepResult.error_class || null,
+      ...(["success", "failed", "cancelled"].includes(newStatus)
+        ? { completed_at: new Date().toISOString() }
+        : {}),
+    })
+    .eq("id", executionStateId);
+}
 
 /**
  * Get today's date (YYYY-MM-DD) in the given IANA timezone.
@@ -209,7 +321,7 @@ Deno.serve(async (req) => {
       const { data, error } = await supabase
         .from("jobs")
         .select(
-          "id, name, description, schedule, workflow_name, workflow_payload, is_active, task_type, task_config, schedule_type, daily_time, timezone, cron_expr",
+          "id, name, description, schedule, workflow_name, workflow_payload, is_active, task_type, task_config, schedule_type, daily_time, timezone, cron_expr, steps",
         )
         .eq("id", jobId)
         .single();
@@ -229,7 +341,7 @@ Deno.serve(async (req) => {
       const { data, error } = await supabase
         .from("jobs")
         .select(
-          "id, name, description, schedule, workflow_name, workflow_payload, is_active, task_type, task_config, schedule_type, daily_time, timezone, cron_expr",
+          "id, name, description, schedule, workflow_name, workflow_payload, is_active, task_type, task_config, schedule_type, daily_time, timezone, cron_expr, steps",
         )
         .eq("is_active", true);
 
@@ -357,30 +469,170 @@ Deno.serve(async (req) => {
       const taskType = job.task_type || "n8n_webhook";
 
       if (taskType === "browser_flow") {
-        // Placeholder — not yet implemented
+        // ── browser_flow: Multi-step browser automation with state machine ──
+        const steps = (job.steps || []) as Job["steps"];
+        if (steps.length === 0) {
+          const completedAt = new Date().toISOString();
+          const durationMs = new Date(completedAt).getTime() - new Date(startedAt).getTime();
+          await supabase.from("job_runs").update({
+            status: "skipped", output: { message: "No steps defined for browser_flow" },
+            completed_at: completedAt, duration_ms: durationMs,
+          }).eq("id", runId);
+          await supabase.from("jobs").update({ last_run_at: completedAt }).eq("id", job.id);
+          results.push({ job_id: job.id, job_name: job.name, status: "skipped", reason: "No steps defined" });
+          continue;
+        }
+
+        // Check for existing execution state (resume scenario)
+        let execState = await getExecutionState(supabase, runId);
+        let execStateId: string;
+        const maxRetries = (job.task_config as Record<string, unknown>)?.max_retries as number || 3;
+
+        if (execState && ["failed", "paused", "waiting_for_login", "waiting_for_approval"].includes(execState.status)) {
+          // Resume from last checkpoint
+          execStateId = execState.id;
+          await updateExecutionState(supabase, execStateId, {
+            status: "running",
+            retry_count: (execState.retry_count || 0) + 1,
+          });
+        } else if (!execState) {
+          // Fresh start
+          execStateId = await initExecutionState(supabase, runId, steps, maxRetries);
+          await updateExecutionState(supabase, execStateId, {
+            status: "running",
+            started_at: new Date().toISOString(),
+          });
+        } else {
+          execStateId = execState.id;
+        }
+
+        // Reload state
+        execState = await getExecutionState(supabase, runId);
+        const startStep = execState?.current_step || 0;
+
+        await supabase.from("job_runs").update({ status: "running" }).eq("id", runId);
+
+        let lastUrl: string | null = (execState?.resume_token as Record<string, unknown>)?.last_url as string || null;
+        let flowFailed = false;
+        let failedStepResult: StepResult | null = null;
+        let finalStatus = "success";
+
+        for (let i = startStep; i < steps.length; i++) {
+          const step = steps[i];
+          const stepStart = new Date().toISOString();
+
+          // Update phase
+          await updateExecutionState(supabase, execStateId, {
+            current_step: i,
+            execution_phase: step.phase,
+            status: "running",
+          });
+
+          try {
+            // Call browser-proxy/agent-action for this step
+            const actionPayload = {
+              input: {
+                url: lastUrl || (step.parameters?.url as string),
+                steps: [{ action: step.action, ...step.parameters }],
+              },
+              meta: {
+                tool_name: "browser_do",
+                job_run_id: runId,
+                execution_state_id: execStateId,
+              },
+            };
+
+            const resp = await fetch(`${supabaseUrl}/functions/v1/browser-proxy/agent-action`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${serviceRoleKey}`,
+                apikey: anonKey,
+              },
+              body: JSON.stringify(actionPayload),
+            });
+
+            const result = await resp.json();
+
+            if (!resp.ok || result.error) {
+              throw new Error(result.error || `Step failed with HTTP ${resp.status}`);
+            }
+
+            // Update last known URL
+            if (result.url) lastUrl = result.url;
+
+            const stepEnd = new Date().toISOString();
+            const stepDuration = new Date(stepEnd).getTime() - new Date(stepStart).getTime();
+
+            await appendStepResult(supabase, execStateId, {
+              step: i, phase: step.phase, action: step.action, status: "completed",
+              result: { url: result.url, content: result.content?.substring?.(0, 2000), step_results: result.step_results },
+              started_at: stepStart, completed_at: stepEnd, duration_ms: stepDuration,
+            }, i === steps.length - 1 ? "success" : "running", i + 1);
+
+            // Persist last_url for resume
+            await updateExecutionState(supabase, execStateId, {
+              resume_token: { ...(execState?.resume_token as Record<string, unknown>), last_url: lastUrl, last_completed_step: i },
+            });
+
+          } catch (err: unknown) {
+            const errorMessage = err instanceof Error ? err.message : String(err);
+            const stepEnd = new Date().toISOString();
+            const stepDuration = new Date(stepEnd).getTime() - new Date(stepStart).getTime();
+
+            const classification = classifyBrowserError(errorMessage, lastUrl || "");
+
+            failedStepResult = {
+              step: i, phase: step.phase, action: step.action, status: "failed",
+              error: errorMessage, error_class: classification.error_class,
+              started_at: stepStart, completed_at: stepEnd, duration_ms: stepDuration,
+            };
+
+            // Determine state transition based on error class
+            if (classification.error_class === "login_required") {
+              finalStatus = "waiting_for_login";
+            } else if (classification.error_class === "captcha_detected") {
+              finalStatus = "waiting_for_approval";
+            } else if (classification.is_recoverable && (execState?.retry_count || 0) < maxRetries) {
+              finalStatus = "retrying";
+            } else {
+              finalStatus = "failed";
+            }
+
+            await appendStepResult(supabase, execStateId, failedStepResult, finalStatus, i);
+
+            await updateExecutionState(supabase, execStateId, {
+              resume_token: { ...(execState?.resume_token as Record<string, unknown>), last_url: lastUrl, last_completed_step: i > 0 ? i - 1 : 0 },
+              last_error: errorMessage,
+              last_error_class: classification.error_class,
+            });
+
+            flowFailed = true;
+            break;
+          }
+        }
+
+        // Finalize
         const completedAt = new Date().toISOString();
         const durationMs = new Date(completedAt).getTime() - new Date(startedAt).getTime();
+        const finalExec = await getExecutionState(supabase, runId);
 
-        await supabase
-          .from("job_runs")
-          .update({
-            status: "skipped",
-            output: { message: "browser_flow not yet implemented" },
-            completed_at: completedAt,
-            duration_ms: durationMs,
-          })
-          .eq("id", runId);
+        await supabase.from("job_runs").update({
+          status: flowFailed ? finalStatus : "success",
+          output: { execution_log: finalExec?.execution_log, final_url: lastUrl },
+          error: flowFailed ? failedStepResult?.error : null,
+          completed_at: completedAt,
+          duration_ms: durationMs,
+        }).eq("id", runId);
 
-        await supabase
-          .from("jobs")
-          .update({ last_run_at: completedAt })
-          .eq("id", job.id);
+        await supabase.from("jobs").update({ last_run_at: completedAt }).eq("id", job.id);
 
         results.push({
-          job_id: job.id,
-          job_name: job.name,
-          status: "skipped",
-          reason: "browser_flow not yet implemented",
+          job_id: job.id, job_name: job.name,
+          status: (flowFailed ? finalStatus : "success") as JobResult["status"],
+          error: flowFailed ? failedStepResult?.error : undefined,
+          error_class: flowFailed ? failedStepResult?.error_class : undefined,
+          duration_ms: durationMs,
         });
         continue;
       }

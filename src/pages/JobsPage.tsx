@@ -41,8 +41,12 @@ import {
   History,
   Webhook,
   Globe,
+  Wrench,
+  RefreshCw,
+  Ban,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import ExecutionStepCard from "@/components/jobs/ExecutionStepCard";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -103,8 +107,9 @@ function formatDuration(ms: number | null, startedAt: string | null, completedAt
 function statusBadgeVariant(status: string): "default" | "secondary" | "destructive" | "outline" {
   switch (status) {
     case "success": case "completed": return "default";
-    case "running": return "secondary";
-    case "failed": return "destructive";
+    case "running": case "retrying": return "secondary";
+    case "failed": case "cancelled": return "destructive";
+    case "waiting_for_login": case "waiting_for_approval": case "paused": return "outline";
     default: return "outline";
   }
 }
@@ -112,9 +117,11 @@ function statusBadgeVariant(status: string): "default" | "secondary" | "destruct
 function StatusIcon({ status }: { status: string }) {
   switch (status) {
     case "success": case "completed": return <CheckCircle className="w-3.5 h-3.5" />;
-    case "running": return <Loader className="w-3.5 h-3.5 animate-spin" />;
-    case "failed": return <XCircle className="w-3.5 h-3.5" />;
+    case "running": case "retrying": return <Loader className="w-3.5 h-3.5 animate-spin" />;
+    case "failed": case "cancelled": return <XCircle className="w-3.5 h-3.5" />;
     case "skipped": return <SkipForward className="w-3.5 h-3.5" />;
+    case "waiting_for_login": case "waiting_for_approval": return <Clock className="w-3.5 h-3.5 animate-pulse" />;
+    case "paused": return <Ban className="w-3.5 h-3.5" />;
     default: return <Clock className="w-3.5 h-3.5" />;
   }
 }
@@ -161,6 +168,10 @@ export default function JobsPage() {
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState("settings");
+
+  // Execution state for browser_flow jobs
+  const [executionState, setExecutionState] = useState<Record<string, unknown> | null>(null);
+  const [resumingJob, setResumingJob] = useState(false);
 
   // Editable fields for selected job
   const [editName, setEditName] = useState("");
@@ -218,8 +229,81 @@ export default function JobsPage() {
       fetchJobRuns(selectedJob.id);
     } else {
       setJobRuns([]);
+      setExecutionState(null);
     }
   }, [selectedJob, fetchJobRuns]);
+
+  // ---------- Fetch execution state for latest run ----------
+  useEffect(() => {
+    if (jobRuns.length === 0) {
+      setExecutionState(null);
+      return;
+    }
+    const latestRun = jobRuns[0];
+    (supabase as any)
+      .from("execution_state")
+      .select("*")
+      .eq("job_run_id", latestRun.id)
+      .maybeSingle()
+      .then(({ data }: { data: Record<string, unknown> | null }) => {
+        setExecutionState(data);
+      });
+  }, [jobRuns]);
+
+  // ---------- Real-time subscription for execution_state ----------
+  useEffect(() => {
+    if (!selectedJob) return;
+
+    const channel = supabase
+      .channel(`exec-state-${selectedJob.id}`)
+      .on(
+        "postgres_changes" as any,
+        { event: "*", schema: "public", table: "execution_state" },
+        (payload: { new: Record<string, unknown> }) => {
+          const newState = payload.new;
+          // Check if this execution_state belongs to one of our job_runs
+          if (newState && jobRuns.some((r) => r.id === newState.job_run_id)) {
+            setExecutionState(newState);
+          }
+        },
+      )
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [selectedJob, jobRuns]);
+
+  // ---------- Resume a paused/failed execution ----------
+  const handleResumeExecution = async (jobRunId: string) => {
+    if (!session) return;
+    setResumingJob(true);
+    try {
+      const RESUME_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/jobs-resume`;
+      const resp = await fetch(RESUME_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+          apikey: import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
+        },
+        body: JSON.stringify({ job_run_id: jobRunId }),
+      });
+      const result = await resp.json();
+      if (!resp.ok) throw new Error(result.error || "Resume failed");
+      toast({ title: "Job resumed", description: `Resuming from step ${(executionState?.current_step as number || 0) + 1}` });
+      if (selectedJob) fetchJobRuns(selectedJob.id);
+    } catch (err: any) {
+      toast({ title: "Resume failed", description: err.message, variant: "destructive" });
+    } finally {
+      setResumingJob(false);
+    }
+  };
+
+  // ---------- Cancel execution ----------
+  const handleCancelExecution = async (executionStateId: string) => {
+    await (supabase as any).from("execution_state").update({ status: "cancelled", completed_at: new Date().toISOString() }).eq("id", executionStateId);
+    toast({ title: "Execution cancelled" });
+    if (selectedJob) fetchJobRuns(selectedJob.id);
+  };
 
   // ---------- Populate edit fields when a job is selected ----------
   useEffect(() => {
@@ -578,6 +662,9 @@ export default function JobsPage() {
                 <TabsTrigger value="settings" className="gap-1.5">
                   <Settings className="w-3.5 h-3.5" /> Settings
                 </TabsTrigger>
+                <TabsTrigger value="execution" className="gap-1.5">
+                  <Wrench className="w-3.5 h-3.5" /> Execution
+                </TabsTrigger>
                 <TabsTrigger value="history" className="gap-1.5">
                   <History className="w-3.5 h-3.5" /> Run History
                 </TabsTrigger>
@@ -745,6 +832,142 @@ export default function JobsPage() {
                     Save Changes
                   </Button>
                 </div>
+              </TabsContent>
+
+              {/* ---- Execution Tab ---- */}
+              <TabsContent value="execution" className="flex-1 overflow-y-auto p-4 mt-0 space-y-4">
+                {executionState ? (
+                  <>
+                    {/* Status + Phase */}
+                    <div className="flex items-center gap-3 flex-wrap">
+                      <Badge variant={statusBadgeVariant(executionState.status as string)} className="flex items-center gap-1">
+                        <StatusIcon status={executionState.status as string} />
+                        {executionState.status as string}
+                      </Badge>
+                      {executionState.execution_phase && (
+                        <span className="text-xs text-muted-foreground">
+                          Phase: <span className="font-medium">{executionState.execution_phase as string}</span>
+                        </span>
+                      )}
+                      <span className="text-xs text-muted-foreground">
+                        Step {((executionState.current_step as number) || 0) + 1} / {executionState.total_steps as number}
+                      </span>
+                      {(executionState.retry_count as number) > 0 && (
+                        <span className="text-xs text-amber-500">
+                          Retry #{executionState.retry_count as number}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Progress bar */}
+                    <div className="w-full h-1.5 rounded-full bg-secondary overflow-hidden">
+                      <div
+                        className="h-full rounded-full bg-primary transition-all duration-500"
+                        style={{
+                          width: `${(executionState.total_steps as number) > 0
+                            ? (((executionState.current_step as number) || 0) / (executionState.total_steps as number)) * 100
+                            : 0}%`,
+                        }}
+                      />
+                    </div>
+
+                    {/* Action buttons */}
+                    <div className="flex gap-2">
+                      {["paused", "failed", "waiting_for_login", "waiting_for_approval"].includes(executionState.status as string) && jobRuns[0] && (
+                        <Button
+                          size="sm"
+                          className="gap-1.5 rounded-xl"
+                          onClick={() => handleResumeExecution(jobRuns[0].id)}
+                          disabled={resumingJob}
+                        >
+                          {resumingJob ? (
+                            <Loader className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <RefreshCw className="w-3.5 h-3.5" />
+                          )}
+                          Resume
+                        </Button>
+                      )}
+                      {["running", "retrying", "queued"].includes(executionState.status as string) && (
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          className="gap-1.5 rounded-xl"
+                          onClick={() => handleCancelExecution(executionState.id as string)}
+                        >
+                          <Ban className="w-3.5 h-3.5" /> Cancel
+                        </Button>
+                      )}
+                    </div>
+
+                    {/* Error display */}
+                    {executionState.last_error && (
+                      <div className="p-3 rounded-xl bg-destructive/10 border border-destructive/20">
+                        <div className="flex items-center gap-2 mb-1">
+                          <Badge variant="destructive" className="text-[10px]">
+                            {executionState.last_error_class as string || "error"}
+                          </Badge>
+                        </div>
+                        <pre className="text-xs text-destructive/80 whitespace-pre-wrap break-words">
+                          {executionState.last_error as string}
+                        </pre>
+                      </div>
+                    )}
+
+                    {/* Step timeline */}
+                    <div className="space-y-2">
+                      <p className="text-xs font-medium text-muted-foreground">Execution Steps</p>
+                      {((executionState.execution_log as Array<Record<string, unknown>>) || []).map((step: Record<string, unknown>, i: number) => (
+                        <ExecutionStepCard
+                          key={i}
+                          step={step as any}
+                          isActive={i === (executionState.current_step as number)}
+                        />
+                      ))}
+                      {((executionState.execution_log as Array<Record<string, unknown>>) || []).length === 0 && (
+                        <p className="text-xs text-muted-foreground/60 py-4 text-center">
+                          No steps executed yet.
+                        </p>
+                      )}
+                    </div>
+
+                    {/* Healing log */}
+                    {((executionState.healing_log as Array<Record<string, unknown>>) || []).length > 0 && (
+                      <div className="space-y-2">
+                        <p className="text-xs font-medium text-amber-500 flex items-center gap-1">
+                          <Wrench className="w-3 h-3" /> Self-Healing History
+                        </p>
+                        {((executionState.healing_log as Array<Record<string, unknown>>) || []).map((entry: Record<string, unknown>, i: number) => (
+                          <div key={i} className="p-2 rounded-lg bg-amber-500/5 border border-amber-500/10 text-xs">
+                            <div className="flex items-center gap-2 mb-1">
+                              <Badge variant="outline" className="text-[10px] text-amber-500 border-amber-500/30">
+                                {(entry.strategy as string) || "diagnosis"}
+                              </Badge>
+                              <span className="text-muted-foreground">
+                                {entry.healed ? "Healed" : "Failed"}
+                              </span>
+                            </div>
+                            {entry.suggested_selector && (
+                              <code className="text-[10px] text-muted-foreground block">
+                                {entry.original_selector as string} → {entry.suggested_selector as string}
+                              </code>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <div className="flex flex-col items-center justify-center h-64 text-muted-foreground">
+                    <div className="glass elevation-1 rounded-2xl p-6">
+                      <Wrench className="w-10 h-10 mb-3 opacity-30" />
+                    </div>
+                    <p className="text-sm mt-3">No execution data yet.</p>
+                    <p className="text-xs text-muted-foreground/60 mt-1">
+                      Run a browser_flow job to see step-by-step execution tracking.
+                    </p>
+                  </div>
+                )}
               </TabsContent>
 
               {/* ---- History Tab ---- */}

@@ -82,6 +82,398 @@ async function fetchWithTimeout(
   }
 }
 
+// ═══════════════════════════════════════════════════════
+// Self-Healing: Error Classification
+// ═══════════════════════════════════════════════════════
+
+type ErrorClass =
+  | 'element_not_found'
+  | 'navigation_timeout'
+  | 'login_required'
+  | 'session_expired'
+  | 'captcha_detected'
+  | 'modal_blocking'
+  | 'page_error'
+  | 'unknown';
+
+interface ErrorClassification {
+  error_class: ErrorClass;
+  confidence: number;
+  details: string;
+}
+
+function classifyError(
+  error: string,
+  pageUrl?: string,
+  domSnippet?: string,
+): ErrorClassification {
+  const lower = error.toLowerCase();
+  const urlLower = (pageUrl || '').toLowerCase();
+  const domLower = (domSnippet || '').toLowerCase();
+
+  // Element not found
+  if (lower.includes('waiting for selector') ||
+      lower.includes('no node found') ||
+      lower.includes('failed to find') ||
+      lower.includes('element not found') ||
+      lower.includes('cannot find') ||
+      lower.includes('null is not an object') ||
+      lower.includes('cannot read properties of null')) {
+    return { error_class: 'element_not_found', confidence: 0.95, details: error };
+  }
+
+  // Navigation timeout
+  if (lower.includes('timeout') && (lower.includes('navigation') || lower.includes('goto') || lower.includes('page.goto') || lower.includes('timed out'))) {
+    return { error_class: 'navigation_timeout', confidence: 0.9, details: error };
+  }
+
+  // Login required (URL-based)
+  if (urlLower.includes('/login') || urlLower.includes('/signin') ||
+      urlLower.includes('/auth') || urlLower.includes('/sso') ||
+      urlLower.includes('accounts.google') || urlLower.includes('login.microsoftonline')) {
+    return { error_class: 'login_required', confidence: 0.85, details: `Redirected to login: ${pageUrl}` };
+  }
+
+  // Session expired (DOM-based)
+  if (domLower.includes('please log in') || domLower.includes('sign in to continue') ||
+      domLower.includes('session expired') || domLower.includes('your session has ended') ||
+      domLower.includes('sesi tamat') || domLower.includes('sila log masuk')) {
+    return { error_class: 'session_expired', confidence: 0.85, details: 'Session indicators in page content' };
+  }
+
+  // CAPTCHA detection
+  if (domLower.includes('captcha') || domLower.includes('recaptcha') ||
+      domLower.includes('hcaptcha') || domLower.includes('cf-challenge') ||
+      domLower.includes('challenge-platform') || domLower.includes('turnstile')) {
+    return { error_class: 'captcha_detected', confidence: 0.9, details: 'CAPTCHA element detected' };
+  }
+
+  // Modal blocking
+  if ((domLower.includes('modal') && domLower.includes('overlay')) ||
+      (domLower.includes('dialog') && domLower.includes('backdrop'))) {
+    return { error_class: 'modal_blocking', confidence: 0.7, details: 'Modal/overlay detected in DOM' };
+  }
+
+  // Page error (4xx/5xx indicators)
+  if (lower.includes('404') || lower.includes('not found') ||
+      lower.includes('500') || lower.includes('internal server error')) {
+    return { error_class: 'page_error', confidence: 0.75, details: error };
+  }
+
+  return { error_class: 'unknown', confidence: 0.3, details: error };
+}
+
+// ═══════════════════════════════════════════════════════
+// Self-Healing: Page Diagnosis via LLM
+// ═══════════════════════════════════════════════════════
+
+interface PageDiagnosis {
+  suggested_selector: string | null;
+  page_state: string;
+  error_class: ErrorClass;
+  confidence: number;
+  dismiss_action?: { action: string; selector: string };
+}
+
+async function diagnosePage(
+  browserless: ReturnType<typeof parseBrowserlessUrl>,
+  currentUrl: string | null,
+  originalSelector: string,
+  originalAction: string,
+  errorMessage: string,
+): Promise<PageDiagnosis> {
+  // 1. Get DOM snapshot + blocker detection in a single /function call
+  const diagScript = `export default async function ({ page }) {
+    ${currentUrl ? `await page.goto(${JSON.stringify(currentUrl)}, { waitUntil: "networkidle2", timeout: 12000 }).catch(() => {});` : ''}
+
+    const screenshot = await page.screenshot({ encoding: "base64", fullPage: false }).catch(() => null);
+    const finalUrl = page.url();
+
+    // Compact DOM snapshot
+    const dom = await page.evaluate(() => {
+      const clone = document.body.cloneNode(true);
+      clone.querySelectorAll('script, style, svg, noscript, link[rel=stylesheet], iframe').forEach(e => e.remove());
+      clone.querySelectorAll('*').forEach(e => {
+        for (const attr of [...e.attributes]) {
+          if (attr.name.startsWith('data-') && !['data-testid','data-id','data-name','data-value','data-action','data-type'].includes(attr.name)) {
+            e.removeAttribute(attr.name);
+          }
+          if (['style','class'].includes(attr.name) && attr.value.length > 50) {
+            e.setAttribute(attr.name, attr.value.substring(0, 50));
+          }
+        }
+      });
+      return clone.innerHTML.substring(0, 6000);
+    });
+
+    // Detect common blocking elements
+    const blockers = await page.evaluate(() => {
+      const modals = document.querySelectorAll('[class*="modal"], [class*="overlay"], [role="dialog"], .modal, .popup, .cookie-consent');
+      const captchas = document.querySelectorAll('[class*="captcha"], [class*="recaptcha"], iframe[src*="captcha"]');
+      const loginForms = document.querySelectorAll('form[action*="login"], form[action*="signin"], input[type="password"]');
+      return {
+        hasModal: modals.length > 0,
+        hasCaptcha: captchas.length > 0,
+        hasLoginForm: loginForms.length > 0,
+        modalSelectors: [...modals].slice(0, 3).map(m => {
+          const close = m.querySelector('[class*="close"], [aria-label*="close"], [aria-label*="Close"], button:last-child, .close, .dismiss');
+          return close ? {
+            modal: m.className || m.tagName,
+            closeSelector: close.id ? '#' + close.id : (close.getAttribute('aria-label') ? '[aria-label="' + close.getAttribute('aria-label') + '"]' : close.tagName.toLowerCase() + (close.className ? '.' + close.className.split(' ')[0] : ''))
+          } : null;
+        }).filter(Boolean),
+      };
+    });
+
+    return {
+      data: { dom, screenshot, finalUrl, blockers },
+      type: "application/json",
+    };
+  }`;
+
+  try {
+    const diagResp = await fetchWithTimeout(
+      `${browserless.baseUrl}/function?token=${browserless.token}`,
+      { method: "POST", headers: { "Content-Type": "application/javascript" }, body: diagScript, timeout: 12000 },
+    );
+
+    if (!diagResp.ok) {
+      return { suggested_selector: null, page_state: 'Diagnosis fetch failed', error_class: 'unknown', confidence: 0 };
+    }
+
+    const diagRaw = await diagResp.json();
+    const diagData = diagRaw.data || diagRaw.result || diagRaw;
+    const dom = (diagData.dom as string) || '';
+    const finalUrl = (diagData.finalUrl as string) || '';
+    const blockers = (diagData.blockers as Record<string, unknown>) || {};
+
+    // 2. Quick classification (no LLM needed)
+    if (blockers.hasCaptcha) {
+      return { suggested_selector: null, page_state: 'CAPTCHA present', error_class: 'captcha_detected', confidence: 0.95 };
+    }
+    if (blockers.hasLoginForm && finalUrl !== currentUrl) {
+      return { suggested_selector: null, page_state: `Redirected to login: ${finalUrl}`, error_class: 'login_required', confidence: 0.9 };
+    }
+    if (blockers.hasModal) {
+      const modalInfo = (blockers.modalSelectors as Array<Record<string, string>>)?.[0];
+      return {
+        suggested_selector: null,
+        page_state: 'Modal/overlay blocking interaction',
+        error_class: 'modal_blocking',
+        confidence: 0.85,
+        dismiss_action: modalInfo?.closeSelector ? { action: 'click', selector: modalInfo.closeSelector } : undefined,
+      };
+    }
+
+    // 3. Call Gemini to analyze DOM and suggest new selector
+    const geminiApiKey = Deno.env.get("GEMINI_API_KEY");
+    if (!geminiApiKey) {
+      return { suggested_selector: null, page_state: 'No GEMINI_API_KEY for healing', error_class: 'element_not_found', confidence: 0.5 };
+    }
+
+    const llmMessages = [
+      {
+        role: "system",
+        content: `You are a browser automation expert. Given a DOM snapshot and a failed action, suggest the correct CSS selector.
+Respond with ONLY a JSON object: {"selector":"...","reasoning":"...","error_class":"element_not_found|login_required|session_expired|modal_blocking|page_error"}
+If no suitable selector exists (e.g. the element truly doesn't exist on this page), set selector to null.`
+      },
+      {
+        role: "user",
+        content: `The action "${originalAction}" with selector "${originalSelector}" failed: "${errorMessage}"
+
+Current URL: ${finalUrl}
+
+DOM snapshot (trimmed):
+\`\`\`html
+${dom.substring(0, 4000)}
+\`\`\`
+
+Find the correct CSS selector for the intended element, or classify why the action failed.`
+      }
+    ];
+
+    const llmResp = await fetchWithTimeout(
+      "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${geminiApiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "gemini-2.0-flash",
+          messages: llmMessages,
+          response_format: { type: "json_object" },
+        }),
+        timeout: 10000,
+      },
+    );
+
+    if (!llmResp.ok) {
+      return { suggested_selector: null, page_state: 'LLM analysis failed', error_class: 'element_not_found', confidence: 0.5 };
+    }
+
+    const llmResult = await llmResp.json();
+    const content = llmResult.choices?.[0]?.message?.content || '{}';
+    try {
+      const parsed = JSON.parse(content);
+      return {
+        suggested_selector: parsed.selector || null,
+        page_state: parsed.reasoning || '',
+        error_class: (parsed.error_class as ErrorClass) || 'element_not_found',
+        confidence: parsed.selector ? 0.75 : 0.5,
+      };
+    } catch {
+      return { suggested_selector: null, page_state: content.substring(0, 200), error_class: 'unknown', confidence: 0.3 };
+    }
+  } catch (e) {
+    console.log("diagnosePage error:", e);
+    return { suggested_selector: null, page_state: `Diagnosis error: ${e}`, error_class: 'unknown', confidence: 0 };
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// Self-Healing: Action Execution with Auto-Recovery
+// ═══════════════════════════════════════════════════════
+
+interface HealingResult extends ActionResult {
+  healing_applied: boolean;
+  healing_log: Array<Record<string, unknown>>;
+  error_class?: string;
+}
+
+async function executeBrowserlessActionWithHealing(
+  browserless: ReturnType<typeof parseBrowserlessUrl>,
+  actionType: string,
+  parameters: Record<string, unknown>,
+  currentUrl: string | null,
+  maxHealingAttempts: number = 1,
+): Promise<HealingResult> {
+  const healingLog: Array<Record<string, unknown>> = [];
+  const originalParams = { ...parameters };
+
+  // Attempt 1: Execute normally
+  let result = await executeBrowserlessAction(browserless, actionType, parameters, currentUrl);
+
+  if (result.success) {
+    return { ...result, healing_applied: false, healing_log: [] };
+  }
+
+  // Only attempt healing for action types that use selectors
+  const healableActions = ['click', 'type', 'extract', 'select', 'wait', 'get_html'];
+  if (!healableActions.includes(actionType)) {
+    const classification = classifyError(result.error || '', result.final_url || currentUrl || '');
+    return { ...result, healing_applied: false, healing_log: [], error_class: classification.error_class };
+  }
+
+  // Classify the error
+  const classification = classifyError(result.error || '', result.final_url || currentUrl || '');
+
+  // Non-recoverable at browser-proxy level — return immediately
+  if (classification.error_class === 'captcha_detected' || classification.error_class === 'login_required') {
+    return {
+      ...result,
+      healing_applied: false,
+      healing_log: [{ error_class: classification.error_class, details: classification.details, healable: false, timestamp: new Date().toISOString() }],
+      error_class: classification.error_class,
+    };
+  }
+
+  // Attempt healing
+  for (let attempt = 0; attempt < maxHealingAttempts; attempt++) {
+    console.log(`[self-heal] Attempt ${attempt + 1} for ${actionType} with selector ${parameters.selector}`);
+
+    const diagnosis = await diagnosePage(
+      browserless,
+      result.final_url || currentUrl,
+      (parameters.selector as string) || '',
+      actionType,
+      result.error || '',
+    );
+
+    const logEntry: Record<string, unknown> = {
+      attempt: attempt + 1,
+      original_selector: parameters.selector,
+      diagnosis_error_class: diagnosis.error_class,
+      suggested_selector: diagnosis.suggested_selector,
+      page_state: diagnosis.page_state,
+      timestamp: new Date().toISOString(),
+    };
+
+    // Strategy: dismiss modal, then retry
+    if (diagnosis.error_class === 'modal_blocking' && diagnosis.dismiss_action) {
+      console.log(`[self-heal] Dismissing modal: ${diagnosis.dismiss_action.selector}`);
+      await executeBrowserlessAction(
+        browserless,
+        diagnosis.dismiss_action.action,
+        { selector: diagnosis.dismiss_action.selector },
+        result.final_url || currentUrl,
+      );
+      result = await executeBrowserlessAction(browserless, actionType, originalParams, result.final_url || currentUrl);
+      if (result.success) {
+        logEntry.healed = true;
+        logEntry.strategy = 'dismiss_modal_then_retry';
+        healingLog.push(logEntry);
+        return { ...result, healing_applied: true, healing_log: healingLog };
+      }
+    }
+
+    // Strategy: LLM-suggested selector
+    if (diagnosis.suggested_selector && diagnosis.suggested_selector !== parameters.selector) {
+      console.log(`[self-heal] Trying LLM selector: ${diagnosis.suggested_selector}`);
+      const healedParams = { ...originalParams, selector: diagnosis.suggested_selector };
+      result = await executeBrowserlessAction(browserless, actionType, healedParams, result.final_url || currentUrl);
+      if (result.success) {
+        logEntry.healed = true;
+        logEntry.strategy = 'llm_selector_replacement';
+        logEntry.new_selector = diagnosis.suggested_selector;
+        healingLog.push(logEntry);
+        return { ...result, healing_applied: true, healing_log: healingLog };
+      }
+    }
+
+    // Strategy: refresh page and retry (session_expired)
+    if (diagnosis.error_class === 'session_expired' || classification.error_class === 'session_expired') {
+      console.log(`[self-heal] Refreshing for session_expired`);
+      await executeBrowserlessAction(browserless, 'navigate', { url: result.final_url || currentUrl || '' }, null);
+      result = await executeBrowserlessAction(browserless, actionType, originalParams, result.final_url || currentUrl);
+      if (result.success) {
+        logEntry.healed = true;
+        logEntry.strategy = 'refresh_and_retry';
+        healingLog.push(logEntry);
+        return { ...result, healing_applied: true, healing_log: healingLog };
+      }
+    }
+
+    // Strategy: simple timeout retry
+    if (classification.error_class === 'navigation_timeout') {
+      console.log(`[self-heal] Retrying after navigation_timeout`);
+      result = await executeBrowserlessAction(browserless, actionType, originalParams, currentUrl);
+      if (result.success) {
+        logEntry.healed = true;
+        logEntry.strategy = 'timeout_retry';
+        healingLog.push(logEntry);
+        return { ...result, healing_applied: true, healing_log: healingLog };
+      }
+    }
+
+    logEntry.healed = false;
+    healingLog.push(logEntry);
+  }
+
+  // All healing failed
+  return {
+    ...result,
+    healing_applied: false,
+    healing_log: healingLog,
+    error_class: classification.error_class,
+  };
+}
+
+// Track current URL for browser_get_html tool outside of sessions
+let currentUrl: string | null = null;
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -613,15 +1005,16 @@ Deno.serve(async (req) => {
         return jsonResp({ ...action, awaiting_approval: true });
       }
 
-      // Execute with reconnect: use current_url from session metadata
+      // Execute with reconnect + self-healing
       const meta = (session.metadata as Record<string, unknown>) || {};
-      const currentUrl = (meta.current_url as string) || null;
+      const actionCurrentUrl = (meta.current_url as string) || null;
 
-      const result = await executeBrowserlessAction(
+      const result = await executeBrowserlessActionWithHealing(
         browserless,
         action_type,
         parameters || {},
-        currentUrl,
+        actionCurrentUrl,
+        1, // max 1 healing attempt per action
       );
 
       // Update the session's current_url with the final page URL
@@ -645,6 +1038,10 @@ Deno.serve(async (req) => {
           result: result.data || null,
           screenshot_url: result.screenshot_url || null,
           error: result.error || null,
+          error_class: result.error_class || null,
+          healing_attempts: result.healing_log.length,
+          healing_log: result.healing_log,
+          original_parameters: result.healing_applied ? (parameters || null) : null,
           completed_at: new Date().toISOString(),
         })
         .eq("id", action.id);
@@ -655,6 +1052,8 @@ Deno.serve(async (req) => {
         result: result.data,
         final_url: result.final_url || null,
         error: result.error || null,
+        error_class: result.error_class || null,
+        healing_applied: result.healing_applied,
       });
     }
 
@@ -690,17 +1089,18 @@ Deno.serve(async (req) => {
           .update({ status: "executing" })
           .eq("id", action_id);
 
-        // Get the session's current_url for reconnect
+        // Get the session's current_url for reconnect + self-healing
         const sessionMeta =
           (action.browser_sessions as unknown as { metadata: Record<string, unknown> })
             ?.metadata || {};
-        const currentUrl = (sessionMeta.current_url as string) || null;
+        const approveCurrentUrl = (sessionMeta.current_url as string) || null;
 
-        const result = await executeBrowserlessAction(
+        const result = await executeBrowserlessActionWithHealing(
           browserless,
           action.action_type,
           action.parameters as Record<string, unknown>,
-          currentUrl,
+          approveCurrentUrl,
+          1,
         );
 
         // Update session current_url
@@ -730,6 +1130,10 @@ Deno.serve(async (req) => {
             result: result.data || null,
             screenshot_url: result.screenshot_url || null,
             error: result.error || null,
+            error_class: result.error_class || null,
+            healing_attempts: result.healing_log.length,
+            healing_log: result.healing_log,
+            original_parameters: result.healing_applied ? (action.parameters || null) : null,
             completed_at: new Date().toISOString(),
           })
           .eq("id", action_id);
@@ -738,6 +1142,7 @@ Deno.serve(async (req) => {
           approved: true,
           result: result.data,
           final_url: result.final_url || null,
+          healing_applied: result.healing_applied,
         });
       } else {
         await supabase
@@ -1488,6 +1893,29 @@ function buildCompositeScript(
     let extractedContent = "";
     let takeScreenshot = false;
 
+    // Page state detection helper
+    async function checkPageState() {
+      try {
+        const state = await page.evaluate(() => {
+          const loginIndicators = document.querySelectorAll('input[type="password"], form[action*="login"], form[action*="signin"]');
+          const captchaIndicators = document.querySelectorAll('[class*="captcha"], [class*="recaptcha"], iframe[src*="captcha"], [class*="turnstile"]');
+          const errorIndicators = document.querySelectorAll('.error, .alert-danger, [class*="error-page"], [class*="error-message"]');
+          const modalIndicators = document.querySelectorAll('[class*="modal"][class*="show"], [class*="overlay"][class*="visible"], [role="dialog"][open]');
+          return {
+            hasLoginForm: loginIndicators.length > 0,
+            hasCaptcha: captchaIndicators.length > 0,
+            hasError: errorIndicators.length > 0,
+            hasModal: modalIndicators.length > 0,
+            url: window.location.href,
+          };
+        });
+        if (state.hasCaptcha) stepResults.push("WARNING: CAPTCHA detected on page");
+        if (state.hasLoginForm && stepResults.length > 0) stepResults.push("WARNING: Login form detected - may need re-authentication");
+        if (state.hasError) stepResults.push("WARNING: Error indicators found on page");
+        if (state.hasModal) stepResults.push("WARNING: Modal/overlay detected on page");
+      } catch(e) { /* page check non-fatal */ }
+    }
+
     // Navigate to start URL
     ${startUrl ? `
     await page.goto(${JSON.stringify(startUrl)}, { waitUntil: "networkidle2", timeout: 30000 });
@@ -1496,6 +1924,9 @@ function buildCompositeScript(
 
     // Execute steps
     ${stepCode.join("\n")}
+
+    // Post-execution page state check
+    await checkPageState();
 
     // Always extract page content if not explicitly extracted
     if (!extractedContent) {
