@@ -31,18 +31,30 @@ Deno.serve(async (req) => {
   const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
   const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
 
-  const token = authHeader.replace(/^Bearer\s+/i, "");
+  const token = authHeader.replace(/^Bearer\s+/i, "").trim();
   let isAuthorized = false;
 
   if (token === serviceRoleKey) {
     isAuthorized = true;
   } else if (token) {
+    // Try to validate as a user JWT
     const userClient = createClient(supabaseUrl, anonKey, {
-      global: { headers: { Authorization: authHeader } },
+      global: { headers: { Authorization: `Bearer ${token}` } },
     });
     const { data: { user }, error: authError } = await userClient.auth.getUser();
     if (!authError && user) {
       isAuthorized = true;
+    }
+
+    // Check if token is a service_role JWT
+    if (!isAuthorized && token.startsWith("eyJ")) {
+      try {
+        const payloadB64 = token.split(".")[1];
+        const payload = JSON.parse(atob(payloadB64));
+        if (payload.role === "service_role" && payload.iss === "supabase") {
+          isAuthorized = true;
+        }
+      } catch { /* not a valid JWT */ }
     }
   }
 
