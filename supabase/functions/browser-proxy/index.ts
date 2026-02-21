@@ -749,6 +749,198 @@ Deno.serve(async (req) => {
         });
       }
 
+      // ── Individual browser tools (called by LLM via tool definitions) ──
+      // These map each granular tool name to the corresponding Browserless action.
+
+      // browser_start — Start session / navigate to initial URL
+      if (toolName === "browser_start") {
+        let url = (input.url as string) || "";
+        if (url && !url.startsWith("http://") && !url.startsWith("https://")) {
+          url = "https://" + url;
+        }
+        if (!url) {
+          currentUrl = null;
+          return jsonResp({
+            success: true,
+            url: "about:blank",
+            markdown_content: "Browser session started (no URL specified).",
+          });
+        }
+        const result = await executeBrowserlessAction(bl, "navigate", { url }, null);
+        const data = result.data as Record<string, unknown> || {};
+        const finalUrl = (data.url as string) || url;
+        currentUrl = finalUrl;
+        return jsonResp({
+          success: result.success,
+          title: data.title || "",
+          url: finalUrl,
+          markdown_content: result.success
+            ? `Browser started and navigated to ${finalUrl} — "${data.title || ""}"`
+            : `Failed to start browser at ${url}: ${result.error}`,
+        });
+      }
+
+      // browser_navigate — Navigate to a URL
+      if (toolName === "browser_navigate") {
+        let url = (input.url as string) || "";
+        if (url && !url.startsWith("http://") && !url.startsWith("https://")) {
+          url = "https://" + url;
+        }
+        if (!url) {
+          return jsonResp({ error: "url is required", markdown_content: "Error: url is required for browser_navigate." }, 400);
+        }
+        const result = await executeBrowserlessAction(bl, "navigate", { url }, null);
+        const data = result.data as Record<string, unknown> || {};
+        const finalUrl = (data.url as string) || url;
+        currentUrl = finalUrl;
+        return jsonResp({
+          success: result.success,
+          title: data.title || "",
+          url: finalUrl,
+          markdown_content: result.success
+            ? `Navigated to ${finalUrl} — "${data.title || ""}"`
+            : `Navigation failed: ${result.error}`,
+        });
+      }
+
+      // browser_click — Click an element by CSS selector
+      if (toolName === "browser_click") {
+        const selector = (input.selector as string) || "";
+        if (!selector) {
+          return jsonResp({ error: "selector is required", markdown_content: "Error: selector is required for browser_click." }, 400);
+        }
+        const result = await executeBrowserlessActionWithHealing(bl, "click", { selector }, currentUrl, 1);
+        const data = result.data as Record<string, unknown> || {};
+        const finalUrl = (data.url as string) || currentUrl || "";
+        if (finalUrl) currentUrl = finalUrl;
+        return jsonResp({
+          success: result.success,
+          url: finalUrl,
+          title: data.title || "",
+          healing_applied: result.healing_applied,
+          markdown_content: result.success
+            ? `Clicked \`${selector}\` — now on ${finalUrl}`
+            : `Click failed on \`${selector}\`: ${result.error}${result.healing_applied ? " (self-healing was attempted)" : ""}`,
+        });
+      }
+
+      // browser_type — Type text into an input field
+      if (toolName === "browser_type") {
+        const selector = (input.selector as string) || "";
+        const text = (input.text as string) || "";
+        const clear = !!input.clear;
+        if (!selector) {
+          return jsonResp({ error: "selector is required", markdown_content: "Error: selector is required for browser_type." }, 400);
+        }
+        const result = await executeBrowserlessActionWithHealing(bl, "type", { selector, text, clear, delay: 50 }, currentUrl, 1);
+        const data = result.data as Record<string, unknown> || {};
+        const finalUrl = (data.url as string) || currentUrl || "";
+        if (finalUrl) currentUrl = finalUrl;
+        return jsonResp({
+          success: result.success,
+          url: finalUrl,
+          healing_applied: result.healing_applied,
+          markdown_content: result.success
+            ? `Typed ${text.length} characters into \`${selector}\``
+            : `Type failed on \`${selector}\`: ${result.error}`,
+        });
+      }
+
+      // browser_screenshot — Take a screenshot
+      if (toolName === "browser_screenshot") {
+        const fullPage = !!input.full_page;
+        const result = await executeBrowserlessAction(bl, "screenshot", { full_page: fullPage }, currentUrl);
+        const data = result.data as Record<string, unknown> || {};
+        const screenshot = (data.screenshot as string) || null;
+        const finalUrl = (data.url as string) || currentUrl || "";
+        if (finalUrl) currentUrl = finalUrl;
+        return jsonResp({
+          success: result.success,
+          url: finalUrl,
+          title: data.title || "",
+          screenshot: screenshot ? screenshot.substring(0, 100000) : null,
+          markdown_content: result.success
+            ? `Screenshot taken of ${finalUrl}`
+            : `Screenshot failed: ${result.error}`,
+        });
+      }
+
+      // browser_extract — Extract text content from the page
+      if (toolName === "browser_extract") {
+        const selector = (input.selector as string) || "body";
+        const result = await executeBrowserlessAction(bl, "extract", { selector }, currentUrl);
+        const data = result.data as Record<string, unknown> || {};
+        const content = ((data.content as string) || "").substring(0, 10000);
+        const finalUrl = (data.url as string) || currentUrl || "";
+        if (finalUrl) currentUrl = finalUrl;
+        return jsonResp({
+          success: result.success,
+          url: finalUrl,
+          title: data.title || "",
+          content,
+          markdown_content: result.success
+            ? `Extracted content from \`${selector}\` on ${finalUrl}:\n\n${content}`
+            : `Extract failed: ${result.error}`,
+        });
+      }
+
+      // browser_scroll — Scroll the page
+      if (toolName === "browser_scroll") {
+        const direction = (input.direction as string) || "down";
+        const amount = Number(input.amount) || 500;
+        const result = await executeBrowserlessAction(bl, "scroll", { direction, amount }, currentUrl);
+        const data = result.data as Record<string, unknown> || {};
+        const finalUrl = (data.url as string) || currentUrl || "";
+        if (finalUrl) currentUrl = finalUrl;
+        return jsonResp({
+          success: result.success,
+          url: finalUrl,
+          markdown_content: result.success
+            ? `Scrolled ${direction} ${amount}px`
+            : `Scroll failed: ${result.error}`,
+        });
+      }
+
+      // browser_select — Select a dropdown option
+      if (toolName === "browser_select") {
+        const selector = (input.selector as string) || "";
+        const value = (input.value as string) || "";
+        if (!selector) {
+          return jsonResp({ error: "selector is required", markdown_content: "Error: selector is required for browser_select." }, 400);
+        }
+        const result = await executeBrowserlessActionWithHealing(bl, "select", { selector, value }, currentUrl, 1);
+        const data = result.data as Record<string, unknown> || {};
+        const finalUrl = (data.url as string) || currentUrl || "";
+        if (finalUrl) currentUrl = finalUrl;
+        return jsonResp({
+          success: result.success,
+          url: finalUrl,
+          markdown_content: result.success
+            ? `Selected "${value}" in \`${selector}\``
+            : `Select failed on \`${selector}\`: ${result.error}`,
+        });
+      }
+
+      // browser_stop — Close/stop the browser session
+      if (toolName === "browser_stop") {
+        currentUrl = null;
+        return jsonResp({
+          success: true,
+          markdown_content: "Browser session stopped.",
+        });
+      }
+
+      // browser_wait_for_user — Pause and wait for user action (CAPTCHA, 2FA, etc.)
+      if (toolName === "browser_wait_for_user") {
+        const instruction = (input.instruction as string) || "Please complete the required action in the browser.";
+        return jsonResp({
+          success: true,
+          waiting: true,
+          instruction,
+          markdown_content: `Waiting for user action: ${instruction}`,
+        });
+      }
+
       return jsonResp({ error: `Unknown tool: ${toolName}`, markdown_content: `Unknown browser tool: ${toolName}` }, 400);
     } catch (err) {
       return jsonResp({
