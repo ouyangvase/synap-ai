@@ -269,7 +269,12 @@ Deno.serve(async (req) => {
       // Steps: navigate, click, type, select, scroll, wait, extract, screenshot
       if (toolName === "browser_do") {
         const steps = (input.steps as Array<Record<string, unknown>>) || [];
-        const url = (input.url as string) || "";
+        let url = (input.url as string) || "";
+
+        // Auto-fix missing protocol (LLM often sends "www.example.com" without https://)
+        if (url && !url.startsWith("http://") && !url.startsWith("https://")) {
+          url = "https://" + url;
+        }
 
         if (!url && steps.length === 0) {
           return jsonResp({ error: "Either 'url' or 'steps' is required", markdown_content: "Error: provide a url or steps array." }, 400);
@@ -880,24 +885,37 @@ Deno.serve(async (req) => {
 // ═══════════════════════════════════════════════════════
 
 /**
- * Build a single Puppeteer script that navigates to a URL then runs
- * a sequence of steps (click, type, select, scroll, wait, extract, screenshot)
- * all within the SAME browser context — preserving cookies, localStorage,
- * and DOM state between steps.
+ * Build a Puppeteer script with SMART LOCATORS.
  *
- * This solves the ephemeral-session problem where each /function call
- * creates a new browser: by combining all steps into one script.
+ * Instead of requiring CSS selectors, the script includes helper functions
+ * that locate elements by label, placeholder, role, text, or name attribute —
+ * just like Playwright's getByLabel/getByRole/getByText.
+ *
+ * Smart actions:
+ *   fill_by_label      — find input by associated <label> text
+ *   fill_by_placeholder — find input by placeholder attribute
+ *   fill_by_name       — find input by name attribute
+ *   fill_by_type       — find input by type (e.g. "email", "password")
+ *   click_by_text      — click element containing visible text
+ *   click_by_role      — click element by ARIA role + accessible name
+ *   click_best_match   — click the best button/link matching an intent
+ *   wait_for_url       — wait until URL contains a string
+ *   wait_for_text      — wait until visible text appears on page
+ *   login              — all-in-one login helper
+ *
+ * Legacy CSS-based actions (click, type, select, etc.) still work as fallback.
  */
 function buildCompositeScript(
   startUrl: string,
   steps: Array<Record<string, unknown>>,
 ): string {
-  // Build step code from the array
   const stepCode: string[] = [];
 
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];
     const action = (step.action as string) || "";
+
+    // Common params (JSON-escaped for safety inside generated code)
     const selector = JSON.stringify((step.selector as string) || "body");
     const text = JSON.stringify((step.text as string) || "");
     const value = JSON.stringify((step.value as string) || "");
@@ -907,6 +925,162 @@ function buildCompositeScript(
     const amount = Number(step.amount) || 500;
 
     switch (action) {
+
+      // ── Smart fill actions ──
+
+      case "fill_by_label":
+        stepCode.push(`
+          try {
+            const labelText = ${JSON.stringify((step.label as string) || "")};
+            const val = ${JSON.stringify((step.value as string) || "")};
+            const filled = await helpers.fillByLabel(page, labelText, val);
+            stepResults.push(filled
+              ? "Filled input labeled \\"" + labelText + "\\""
+              : "WARN: no input found for label \\"" + labelText + "\\" — trying fallback");
+            if (!filled) {
+              const fb = await helpers.fillFallback(page, labelText, val);
+              stepResults.push(fb ? "Fallback fill succeeded for \\"" + labelText + "\\"" : "FAIL: could not fill \\"" + labelText + "\\"");
+            }
+          } catch(e) { stepResults.push("fill_by_label error: " + e.message); }
+        `);
+        break;
+
+      case "fill_by_placeholder":
+        stepCode.push(`
+          try {
+            const ph = ${JSON.stringify((step.placeholder as string) || "")};
+            const val = ${JSON.stringify((step.value as string) || "")};
+            const filled = await helpers.fillByPlaceholder(page, ph, val);
+            stepResults.push(filled
+              ? "Filled input with placeholder \\"" + ph + "\\""
+              : "FAIL: no input with placeholder \\"" + ph + "\\"");
+          } catch(e) { stepResults.push("fill_by_placeholder error: " + e.message); }
+        `);
+        break;
+
+      case "fill_by_name":
+        stepCode.push(`
+          try {
+            const nameAttr = ${JSON.stringify((step.name as string) || "")};
+            const val = ${JSON.stringify((step.value as string) || "")};
+            const sel = '[name="' + nameAttr + '"]';
+            await page.waitForSelector(sel, { timeout: 8000 });
+            await page.click(sel, { clickCount: 3 });
+            await page.keyboard.press("Backspace");
+            await page.type(sel, val, { delay: 30 });
+            stepResults.push("Filled input [name=" + nameAttr + "]");
+          } catch(e) { stepResults.push("fill_by_name error: " + e.message); }
+        `);
+        break;
+
+      case "fill_by_type":
+        stepCode.push(`
+          try {
+            const inputType = ${JSON.stringify((step.type as string) || "text")};
+            const val = ${JSON.stringify((step.value as string) || "")};
+            const sel = 'input[type="' + inputType + '"]';
+            await page.waitForSelector(sel, { timeout: 8000 });
+            await page.click(sel, { clickCount: 3 });
+            await page.keyboard.press("Backspace");
+            await page.type(sel, val, { delay: 30 });
+            stepResults.push("Filled input[type=" + inputType + "]");
+          } catch(e) { stepResults.push("fill_by_type error: " + e.message); }
+        `);
+        break;
+
+      // ── Smart click actions ──
+
+      case "click_by_text":
+        stepCode.push(`
+          try {
+            const txt = ${JSON.stringify((step.text as string) || "")};
+            const clicked = await helpers.clickByText(page, txt);
+            if (clicked) {
+              await new Promise(r => setTimeout(r, 1500));
+              await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 8000 }).catch(() => {});
+              stepResults.push("Clicked element with text \\"" + txt + "\\"");
+            } else {
+              stepResults.push("FAIL: no clickable element with text \\"" + txt + "\\"");
+            }
+          } catch(e) { stepResults.push("click_by_text error: " + e.message); }
+        `);
+        break;
+
+      case "click_by_role":
+        stepCode.push(`
+          try {
+            const role = ${JSON.stringify((step.role as string) || "button")};
+            const name = ${JSON.stringify((step.name as string) || "")};
+            const clicked = await helpers.clickByRole(page, role, name);
+            if (clicked) {
+              await new Promise(r => setTimeout(r, 1500));
+              await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 8000 }).catch(() => {});
+              stepResults.push("Clicked " + role + " \\"" + name + "\\"");
+            } else {
+              stepResults.push("FAIL: no " + role + " named \\"" + name + "\\"");
+            }
+          } catch(e) { stepResults.push("click_by_role error: " + e.message); }
+        `);
+        break;
+
+      case "click_best_match":
+        stepCode.push(`
+          try {
+            const intent = ${JSON.stringify((step.intent as string) || "submit")};
+            const clicked = await helpers.clickBestMatch(page, intent);
+            if (clicked) {
+              await new Promise(r => setTimeout(r, 1500));
+              await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 8000 }).catch(() => {});
+              stepResults.push("Clicked best match for intent \\"" + intent + "\\"");
+            } else {
+              stepResults.push("FAIL: no match for intent \\"" + intent + "\\"");
+            }
+          } catch(e) { stepResults.push("click_best_match error: " + e.message); }
+        `);
+        break;
+
+      // ── Smart wait actions ──
+
+      case "wait_for_url":
+        stepCode.push(`
+          try {
+            const fragment = ${JSON.stringify((step.text as string) || "")};
+            const timeout = ${Number(step.timeout) || 10000};
+            await helpers.waitForUrl(page, fragment, timeout);
+            stepResults.push("URL now contains \\"" + fragment + "\\"");
+          } catch(e) { stepResults.push("wait_for_url timeout: URL never contained \\"" + ${JSON.stringify((step.text as string) || "")} + "\\""); }
+        `);
+        break;
+
+      case "wait_for_text":
+        stepCode.push(`
+          try {
+            const txt = ${JSON.stringify((step.text as string) || "")};
+            const timeout = ${Number(step.timeout) || 10000};
+            await helpers.waitForText(page, txt, timeout);
+            stepResults.push("Text \\"" + txt + "\\" is now visible");
+          } catch(e) { stepResults.push("wait_for_text timeout: \\"" + ${JSON.stringify((step.text as string) || "")} + "\\" not found"); }
+        `);
+        break;
+
+      // ── All-in-one login helper ──
+
+      case "login":
+        stepCode.push(`
+          try {
+            const email = ${JSON.stringify((step.email as string) || "")};
+            const password = ${JSON.stringify((step.password as string) || "")};
+            const loginResult = await helpers.autoLogin(page, email, password);
+            stepResults.push(...loginResult.steps);
+            if (!loginResult.success) {
+              stepResults.push("Login may require manual intervention");
+            }
+          } catch(e) { stepResults.push("login error: " + e.message); }
+        `);
+        break;
+
+      // ── Legacy CSS-based actions (still supported as fallback) ──
+
       case "navigate":
         stepCode.push(`
           await page.goto(${url}, { waitUntil: "networkidle2", timeout: 30000 });
@@ -1025,7 +1199,291 @@ function buildCompositeScript(
     }
   }
 
+  // The generated script includes smart locator helpers
   return `export default async function ({ page }) {
+
+    // ═══ Smart Locator Helpers (Puppeteer equivalents of Playwright getByLabel etc.) ═══
+    const helpers = {
+
+      // Fill an input by its associated <label> text (case-insensitive partial match)
+      async fillByLabel(page, labelText, value) {
+        const handle = await page.evaluateHandle((lt) => {
+          const lower = lt.toLowerCase();
+          // Strategy 1: <label> with matching text whose "for" points to an input
+          for (const label of document.querySelectorAll("label")) {
+            if (label.textContent.toLowerCase().includes(lower)) {
+              const forId = label.getAttribute("for");
+              if (forId) { const inp = document.getElementById(forId); if (inp) return inp; }
+              const nested = label.querySelector("input, textarea, select");
+              if (nested) return nested;
+            }
+          }
+          // Strategy 2: aria-label on input
+          for (const inp of document.querySelectorAll("input, textarea, select")) {
+            const al = inp.getAttribute("aria-label") || "";
+            if (al.toLowerCase().includes(lower)) return inp;
+          }
+          return null;
+        }, labelText);
+        const el = handle.asElement();
+        if (!el) return false;
+        await el.click({ clickCount: 3 });
+        await page.keyboard.press("Backspace");
+        await el.type(value, { delay: 30 });
+        return true;
+      },
+
+      // Fill an input by placeholder text (case-insensitive partial match)
+      async fillByPlaceholder(page, placeholder, value) {
+        const handle = await page.evaluateHandle((ph) => {
+          const lower = ph.toLowerCase();
+          for (const inp of document.querySelectorAll("input, textarea")) {
+            const p = inp.getAttribute("placeholder") || "";
+            if (p.toLowerCase().includes(lower)) return inp;
+          }
+          return null;
+        }, placeholder);
+        const el = handle.asElement();
+        if (!el) return false;
+        await el.click({ clickCount: 3 });
+        await page.keyboard.press("Backspace");
+        await el.type(value, { delay: 30 });
+        return true;
+      },
+
+      // Fallback fill: tries placeholder, name, type, aria-label — anything matching the hint
+      async fillFallback(page, hint, value) {
+        const lower = hint.toLowerCase();
+        // Try common patterns based on the hint
+        const strategies = [];
+        if (lower.includes("email")) {
+          strategies.push('input[type="email"]', 'input[name*="email"]', 'input[placeholder*="email" i]', 'input[autocomplete="email"]');
+        }
+        if (lower.includes("password") || lower.includes("kata laluan")) {
+          strategies.push('input[type="password"]', 'input[name*="password"]', 'input[name*="pass"]');
+        }
+        if (lower.includes("user") || lower.includes("nama")) {
+          strategies.push('input[name*="user"]', 'input[name*="login"]', 'input[autocomplete="username"]');
+        }
+        // Generic fallbacks
+        strategies.push('input[name*="' + lower.split(" ")[0] + '"]', 'input[placeholder*="' + lower.split(" ")[0] + '" i]');
+
+        for (const sel of strategies) {
+          try {
+            const el = await page.$(sel);
+            if (el) {
+              await el.click({ clickCount: 3 });
+              await page.keyboard.press("Backspace");
+              await el.type(value, { delay: 30 });
+              return true;
+            }
+          } catch {}
+        }
+        return false;
+      },
+
+      // Click an element by its visible text (case-insensitive)
+      async clickByText(page, text) {
+        return await page.evaluate((txt) => {
+          const lower = txt.toLowerCase();
+          // Prioritize buttons and links, then any clickable element
+          const candidates = [...document.querySelectorAll("button, a, [role=button], input[type=submit], input[type=button]")];
+          for (const el of candidates) {
+            const vis = (el.textContent || el.value || "").trim().toLowerCase();
+            if (vis.includes(lower) || lower.includes(vis)) {
+              el.click();
+              return true;
+            }
+          }
+          // Broader search: any element
+          const all = [...document.querySelectorAll("*")];
+          for (const el of all) {
+            if (el.children.length > 3) continue; // skip containers
+            const vis = (el.textContent || "").trim().toLowerCase();
+            if (vis === lower) { el.click(); return true; }
+          }
+          return false;
+        }, text);
+      },
+
+      // Click by ARIA role and accessible name
+      async clickByRole(page, role, name) {
+        return await page.evaluate((r, n) => {
+          const lower = n.toLowerCase();
+          const els = document.querySelectorAll("[role=" + r + "], " + r);
+          for (const el of els) {
+            const accName = (el.getAttribute("aria-label") || el.textContent || "").trim().toLowerCase();
+            if (accName.includes(lower)) { el.click(); return true; }
+          }
+          // For role=button, also check <button> elements
+          if (r === "button") {
+            for (const el of document.querySelectorAll("button, input[type=submit], input[type=button]")) {
+              const t = (el.textContent || el.value || "").trim().toLowerCase();
+              if (t.includes(lower)) { el.click(); return true; }
+            }
+          }
+          if (r === "link") {
+            for (const el of document.querySelectorAll("a")) {
+              const t = (el.textContent || "").trim().toLowerCase();
+              if (t.includes(lower)) { el.click(); return true; }
+            }
+          }
+          return false;
+        }, role, name);
+      },
+
+      // Click the best matching button/link for an intent like "sign in", "login", "submit"
+      async clickBestMatch(page, intent) {
+        return await page.evaluate((intent) => {
+          const lower = intent.toLowerCase();
+          // Common login/submit button patterns in multiple languages
+          const patterns = [lower];
+          if (lower.includes("sign in") || lower.includes("login") || lower.includes("log in")) {
+            patterns.push("sign in", "log in", "login", "masuk", "submit", "continue", "next");
+          }
+          if (lower.includes("submit")) {
+            patterns.push("submit", "send", "go", "ok");
+          }
+          if (lower.includes("sign up") || lower.includes("register")) {
+            patterns.push("sign up", "register", "create account", "daftar");
+          }
+          const candidates = [...document.querySelectorAll("button, a[role=button], input[type=submit], input[type=button], [role=button]")];
+          for (const pattern of patterns) {
+            for (const el of candidates) {
+              const t = (el.textContent || el.value || "").trim().toLowerCase();
+              if (t.includes(pattern)) { el.click(); return true; }
+            }
+          }
+          // Last resort: click submit button in a form
+          const submit = document.querySelector("form button[type=submit], form input[type=submit], form button:not([type])");
+          if (submit) { submit.click(); return true; }
+          return false;
+        }, intent);
+      },
+
+      // Wait until URL contains a string
+      async waitForUrl(page, fragment, timeout = 10000) {
+        const start = Date.now();
+        while (Date.now() - start < timeout) {
+          if (page.url().includes(fragment)) return;
+          await new Promise(r => setTimeout(r, 300));
+        }
+        throw new Error("URL never contained " + fragment);
+      },
+
+      // Wait until visible text appears on page
+      async waitForText(page, text, timeout = 10000) {
+        const start = Date.now();
+        while (Date.now() - start < timeout) {
+          const found = await page.evaluate((t) => {
+            return document.body && document.body.innerText.toLowerCase().includes(t.toLowerCase());
+          }, text);
+          if (found) return;
+          await new Promise(r => setTimeout(r, 300));
+        }
+        throw new Error("Text never appeared: " + text);
+      },
+
+      // All-in-one login: tries multiple strategies to fill email + password + click submit
+      async autoLogin(page, email, password) {
+        const steps = [];
+
+        // ── Fill email ──
+        let emailFilled = false;
+        // Try type=email first
+        try {
+          const emailSel = 'input[type="email"]';
+          const el = await page.$(emailSel);
+          if (el) {
+            await el.click({ clickCount: 3 });
+            await page.keyboard.press("Backspace");
+            await el.type(email, { delay: 30 });
+            emailFilled = true;
+            steps.push("Filled email via input[type=email]");
+          }
+        } catch {}
+        // Try label
+        if (!emailFilled) {
+          emailFilled = await helpers.fillByLabel(page, "email", email) || await helpers.fillByLabel(page, "e-mel", email);
+          if (emailFilled) steps.push("Filled email via label");
+        }
+        // Try placeholder
+        if (!emailFilled) {
+          emailFilled = await helpers.fillByPlaceholder(page, "email", email);
+          if (emailFilled) steps.push("Filled email via placeholder");
+        }
+        // Try name
+        if (!emailFilled) {
+          try {
+            for (const n of ["email", "username", "user", "login"]) {
+              const s = 'input[name*="' + n + '"]';
+              const el = await page.$(s);
+              if (el) { await el.click({clickCount:3}); await page.keyboard.press("Backspace"); await el.type(email, {delay:30}); emailFilled = true; steps.push("Filled email via name=" + n); break; }
+            }
+          } catch {}
+        }
+        // Try first visible text input as last resort
+        if (!emailFilled) {
+          try {
+            const filled = await page.evaluate((em) => {
+              const inputs = document.querySelectorAll('input:not([type=hidden]):not([type=password]):not([type=submit]):not([type=checkbox]):not([type=radio])');
+              for (const inp of inputs) {
+                if (inp.offsetParent !== null) { inp.value = em; inp.dispatchEvent(new Event("input", {bubbles:true})); return true; }
+              }
+              return false;
+            }, email);
+            if (filled) { emailFilled = true; steps.push("Filled email via first visible input"); }
+          } catch {}
+        }
+        if (!emailFilled) steps.push("FAIL: could not find email field");
+
+        // ── Fill password ──
+        let passFilled = false;
+        try {
+          const passSel = 'input[type="password"]';
+          await page.waitForSelector(passSel, { timeout: 5000 });
+          const el = await page.$(passSel);
+          if (el) {
+            await el.click({ clickCount: 3 });
+            await page.keyboard.press("Backspace");
+            await el.type(password, { delay: 30 });
+            passFilled = true;
+            steps.push("Filled password via input[type=password]");
+          }
+        } catch {}
+        if (!passFilled) steps.push("FAIL: could not find password field");
+
+        // ── Click submit ──
+        let clicked = false;
+        await new Promise(r => setTimeout(r, 500));
+        // Try common button texts
+        for (const txt of ["Sign in", "Log in", "Login", "Masuk", "Submit", "Continue", "Sign In", "LOG IN"]) {
+          clicked = await helpers.clickByText(page, txt);
+          if (clicked) { steps.push("Clicked submit: \\"" + txt + "\\""); break; }
+        }
+        if (!clicked) {
+          // Try role=button, form submit
+          clicked = await page.evaluate(() => {
+            const btn = document.querySelector("form button[type=submit], form input[type=submit], form button:not([type]), button[type=submit]");
+            if (btn) { btn.click(); return true; }
+            return false;
+          });
+          if (clicked) steps.push("Clicked form submit button");
+        }
+        if (!clicked) steps.push("FAIL: could not find submit button");
+
+        // Wait for navigation
+        if (clicked) {
+          await new Promise(r => setTimeout(r, 2000));
+          await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 10000 }).catch(() => {});
+          steps.push("Post-login URL: " + page.url());
+        }
+
+        return { success: emailFilled && passFilled && clicked, steps };
+      },
+    };
+
+    // ═══ Main execution ═══
     const stepResults = [];
     let extractedContent = "";
     let takeScreenshot = false;
@@ -1042,7 +1500,6 @@ function buildCompositeScript(
     // Always extract page content if not explicitly extracted
     if (!extractedContent) {
       try {
-        const remove = document.querySelectorAll ? null : null;
         extractedContent = await page.evaluate(() => {
           const rm = document.querySelectorAll("script, style, nav, footer, header, aside, [role=navigation], [role=banner]");
           rm.forEach(el => el.remove());
