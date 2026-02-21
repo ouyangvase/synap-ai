@@ -993,6 +993,33 @@ function buildCompositeScript(
         `);
         break;
 
+      case "get_html":
+        stepCode.push(`
+          try {
+            await page.waitForSelector(${selector}, { timeout: 10000 }).catch(() => {});
+            const html = await page.evaluate((sel, limit) => {
+              const el = document.querySelector(sel);
+              if (!el) return "(element not found)";
+              if (sel === "body" || sel === "html") {
+                const clone = el.cloneNode(true);
+                clone.querySelectorAll("script, style, svg, noscript, link[rel=stylesheet], iframe").forEach(e => e.remove());
+                clone.querySelectorAll("*").forEach(e => {
+                  for (const attr of [...e.attributes]) {
+                    if (attr.name.startsWith("data-") && !["data-testid","data-id","data-name","data-value","data-action","data-type"].includes(attr.name)) {
+                      e.removeAttribute(attr.name);
+                    }
+                  }
+                });
+                return clone.innerHTML.substring(0, limit);
+              }
+              return el.outerHTML.substring(0, limit);
+            }, ${selector}, ${Number(step.max_length) || 8000});
+            extractedContent = html;
+            stepResults.push("Got HTML structure from " + ${selector});
+          } catch(e) { stepResults.push("get_html failed: " + e.message); }
+        `);
+        break;
+
       default:
         stepCode.push(`stepResults.push("Unknown action: ${action}");`);
     }
