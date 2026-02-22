@@ -2628,7 +2628,9 @@ function buildCompositeScript(
                 return { found: false };
               }, searchText);
               if (rowInfo.found) break;
-              // Check if page is still loading
+              // Always retry at least 3 times to handle SPA transitions
+              if (_frRetry < 3) continue;
+              // After minimum retries, check if page is still loading
               const isLoading = await page.evaluate(() => {
                 const body = document.body.innerText.toLowerCase();
                 return body.includes("loading") || body.includes("skeleton") || !!document.querySelector("[class*='spinner'], [class*='loading'], [class*='skeleton'], .animate-spin, .animate-pulse");
@@ -2697,7 +2699,9 @@ function buildCompositeScript(
                 const body = document.body.innerText.toLowerCase();
                 return body.includes("loading") || body.includes("skeleton") || !!document.querySelector("[class*='spinner'], [class*='loading'], [class*='skeleton'], .animate-spin, .animate-pulse");
               }).catch(() => false);
-              if (!isLoading && _cirRetry >= 1) break;
+              // Always retry at least 3 times to handle SPA transitions
+              if (_cirRetry < 3) continue;
+              if (!isLoading) break;
             }
             if (clicked.clicked) {
               await new Promise(r => setTimeout(r, 1500));
