@@ -672,8 +672,42 @@ Deno.serve(async (req) => {
           return jsonResp({ error: "Either 'url' or 'steps' is required", markdown_content: "Error: provide a url or steps array." }, 400);
         }
 
+        // ── Part B: Health check before execution ──
+        // Verify Browserless is reachable before committing to a multi-step flow
+        try {
+          const healthResp = await fetchWithTimeout(
+            `${bl.baseUrl}/json/version?token=${bl.token}`,
+            { timeout: 10_000 },
+          );
+          if (!healthResp.ok) {
+            console.warn("[browser_do] Health check failed:", healthResp.status);
+            // Retry once after a brief wait
+            await new Promise(r => setTimeout(r, 2000));
+            const retryResp = await fetchWithTimeout(
+              `${bl.baseUrl}/json/version?token=${bl.token}`,
+              { timeout: 10_000 },
+            );
+            if (!retryResp.ok) {
+              return jsonResp({
+                error: "Browser service unavailable after retry",
+                markdown_content: "Browser service is not responding. Please try again in a moment.",
+              }, 503);
+            }
+          }
+        } catch (healthErr) {
+          console.error("[browser_do] Health check exception:", healthErr);
+          return jsonResp({
+            error: `Browser service unreachable: ${healthErr instanceof Error ? healthErr.message : String(healthErr)}`,
+            markdown_content: "Cannot reach the browser service. Please try again.",
+          }, 503);
+        }
+
         // Build a single Puppeteer script that runs all steps
         const script = buildCompositeScript(url, steps);
+
+        // ── Part B: Watchdog timeout ──
+        // Total timeout scales with step count (20s base + 8s per step, max 120s)
+        const watchdogTimeout = Math.min(20_000 + steps.length * 8_000, 120_000);
 
         const resp = await fetchWithTimeout(
           `${bl.baseUrl}/function?token=${bl.token}`,
@@ -681,12 +715,65 @@ Deno.serve(async (req) => {
             method: "POST",
             headers: { "Content-Type": "application/javascript" },
             body: script,
-            timeout: 55_000,
+            timeout: watchdogTimeout,
           },
         );
 
         if (!resp.ok) {
           const errText = await resp.text();
+          // ── Part B: Auto-recovery on 5xx ──
+          // If Browserless returns 5xx, retry once with a fresh request
+          if (resp.status >= 500) {
+            console.warn("[browser_do] Browserless 5xx, retrying once...");
+            await new Promise(r => setTimeout(r, 1500));
+            const retryResp = await fetchWithTimeout(
+              `${bl.baseUrl}/function?token=${bl.token}`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/javascript" },
+                body: script,
+                timeout: watchdogTimeout,
+              },
+            );
+            if (retryResp.ok) {
+              // Use retry response instead — fall through to result parsing below
+              const contentType2 = retryResp.headers.get("content-type") || "";
+              let result2: Record<string, unknown> = {};
+              if (contentType2.includes("application/json")) {
+                const raw2 = await retryResp.json();
+                result2 = raw2.data || raw2.result || raw2;
+              } else {
+                const text2 = await retryResp.text();
+                result2 = { raw_text: text2.substring(0, 10000) };
+              }
+              const extractedContent2 = (result2.content as string) || "";
+              const pageTitle2 = (result2.title as string) || "";
+              const pageUrl2 = (result2.url as string) || url;
+              const screenshot2 = (result2.screenshot as string) || null;
+              const stepResults2 = (result2.step_results as string[]) || [];
+              const failedSteps2 = stepResults2.filter((s: string) => s.startsWith("FAIL"));
+              let markdown2 = `# ${pageTitle2 || pageUrl2}\n\nFinal URL: ${pageUrl2}\n`;
+              if (failedSteps2.length > 0) {
+                markdown2 += `\n## Steps Failed (${failedSteps2.length})\n`;
+                failedSteps2.forEach((s: string, i: number) => { markdown2 += `${i + 1}. ${s}\n`; });
+              }
+              if (stepResults2.length > 0) {
+                markdown2 += `\nAll steps:\n${stepResults2.map((s: string, i: number) => `${i + 1}. ${s}`).join("\n")}\n`;
+              }
+              if (extractedContent2) markdown2 += `\nPage content:\n${extractedContent2.substring(0, 8000)}`;
+              return jsonResp({
+                success: true,
+                has_failures: failedSteps2.length > 0,
+                failed_step_count: failedSteps2.length,
+                title: pageTitle2, url: pageUrl2,
+                content: extractedContent2.substring(0, 8000),
+                screenshot: screenshot2 ? screenshot2.substring(0, 100000) : null,
+                step_results: stepResults2,
+                markdown_content: markdown2,
+                retried: true,
+              });
+            }
+          }
           return jsonResp({
             error: `Browser action failed (${resp.status})`,
             detail: errText.slice(0, 500),
@@ -708,16 +795,68 @@ Deno.serve(async (req) => {
         const pageTitle = (result.title as string) || "";
         const pageUrl = (result.url as string) || url;
         const screenshot = (result.screenshot as string) || null;
-        const stepResults = (result.step_results as string[]) || [];
+        const rawStepResults = (result.step_results as string[]) || [];
+
+        // Parse raw step result strings into structured objects for the ToolCard timeline
+        const structuredSteps = rawStepResults.map((s: string, i: number) => {
+          const isFail = s.startsWith("FAIL");
+          const isWarning = s.startsWith("WARNING:");
+          // Extract action name from the step string
+          let action = s;
+          let error: string | undefined;
+          let selector: string | undefined;
+          let urlVal: string | undefined;
+          let value: string | undefined;
+
+          if (isFail) {
+            // Format: "FAIL action_name [selector] error_msg | AVAILABLE_..."
+            const pipeIdx = s.indexOf(" | ");
+            const failBody = pipeIdx > 0 ? s.substring(5, pipeIdx) : s.substring(5);
+            const bracketMatch = failBody.match(/\[([^\]]+)\]/);
+            if (bracketMatch) selector = bracketMatch[1];
+            error = failBody.replace(/\[([^\]]+)\]/, "").trim();
+            action = failBody.split(" ")[0] || "unknown";
+          } else {
+            // Success messages like "Clicked element with text \"Sign in\""
+            // or "Navigated to https://..."
+            const urlMatch = s.match(/(?:to|→)\s+(https?:\/\/\S+)/);
+            if (urlMatch) urlVal = urlMatch[1];
+            const selectorMatch = s.match(/`([^`]+)`/);
+            if (selectorMatch) selector = selectorMatch[1];
+            const valueMatch = s.match(/"([^"]+)"/);
+            if (valueMatch) value = valueMatch[1];
+            // Extract action type from the message
+            if (s.toLowerCase().includes("navigated")) action = "navigate";
+            else if (s.toLowerCase().includes("clicked")) action = "click";
+            else if (s.toLowerCase().includes("filled") || s.toLowerCase().includes("typed")) action = "type";
+            else if (s.toLowerCase().includes("selected")) action = "select";
+            else if (s.toLowerCase().includes("scrolled")) action = "scroll";
+            else if (s.toLowerCase().includes("waited")) action = "wait";
+            else if (s.toLowerCase().includes("extracted")) action = "extract";
+            else if (s.toLowerCase().includes("screenshot")) action = "screenshot";
+            else if (s.toLowerCase().includes("pressed")) action = "press";
+            else action = s.substring(0, 40);
+          }
+
+          return {
+            step: i + 1,
+            action,
+            status: isFail ? "failed" : isWarning ? "healed" : "success",
+            error,
+            selector,
+            url: urlVal,
+            value,
+          };
+        });
 
         let markdown = `# ${pageTitle || pageUrl}\n\nFinal URL: ${pageUrl}\n`;
 
         // Detect failures in step results
-        const failedSteps = stepResults.filter((s: string) => s.startsWith("FAIL"));
+        const failedSteps = rawStepResults.filter((s: string) => s.startsWith("FAIL"));
         const hasFailures = failedSteps.length > 0;
 
         if (hasFailures) {
-          markdown += `\n## ⚠ FAILED STEPS (${failedSteps.length})\n`;
+          markdown += `\n## Steps Failed (${failedSteps.length})\n`;
           markdown += `The following steps failed. Use the DOM hints (AVAILABLE_INPUTS / AVAILABLE_BUTTONS) to construct corrected actions:\n\n`;
           failedSteps.forEach((s: string, i: number) => {
             markdown += `${i + 1}. ${s}\n`;
@@ -725,8 +864,8 @@ Deno.serve(async (req) => {
           markdown += `\n**DO NOT ask the user for selectors.** Use the available elements listed above to retry with corrected parameters.\n`;
         }
 
-        if (stepResults.length > 0) {
-          markdown += `\nAll steps:\n${stepResults.map((s: string, i: number) => `${i + 1}. ${s}`).join("\n")}\n`;
+        if (rawStepResults.length > 0) {
+          markdown += `\nAll steps:\n${rawStepResults.map((s: string, i: number) => `${i + 1}. ${s}`).join("\n")}\n`;
         }
         if (extractedContent) {
           markdown += `\nPage content:\n${extractedContent.substring(0, 8000)}`;
@@ -740,7 +879,8 @@ Deno.serve(async (req) => {
           url: pageUrl,
           content: extractedContent.substring(0, 8000),
           screenshot: screenshot ? screenshot.substring(0, 100000) : null,
-          step_results: stepResults,
+          step_results: structuredSteps,
+          raw_step_results: rawStepResults,
           markdown_content: markdown,
         });
       }
@@ -2184,6 +2324,31 @@ function buildCompositeScript(
     let extractedContent = "";
     let takeScreenshot = false;
 
+    // ── Part B: Per-step timeout wrapper ──
+    async function withStepTimeout(fn, timeoutMs, stepName) {
+      return new Promise(async (resolve) => {
+        const timer = setTimeout(() => {
+          stepResults.push("FAIL " + stepName + " timed out after " + timeoutMs + "ms");
+          resolve(false);
+        }, timeoutMs);
+        try {
+          await fn();
+          clearTimeout(timer);
+          resolve(true);
+        } catch(e) {
+          clearTimeout(timer);
+          stepResults.push("FAIL " + stepName + " error: " + e.message);
+          resolve(false);
+        }
+      });
+    }
+
+    // ── Part B: Stuck page watchdog ──
+    let lastStepTime = Date.now();
+    const STUCK_THRESHOLD = 25000; // 25s per step max
+
+    function markStepProgress() { lastStepTime = Date.now(); }
+
     // Page state detection helper
     async function checkPageState() {
       try {
@@ -2213,8 +2378,20 @@ function buildCompositeScript(
     stepResults.push("Navigated to " + ${JSON.stringify(startUrl)});
     ` : ""}
 
-    // Execute steps
-    ${stepCode.join("\n")}
+    // Execute steps with per-step timeout protection
+    ${stepCode.map((code, i) => `
+    markStepProgress();
+    await (async () => {
+      const _stepTimer = setTimeout(() => {
+        stepResults.push("FAIL step_${i + 1} timed out after " + STUCK_THRESHOLD + "ms");
+      }, STUCK_THRESHOLD);
+      try {
+        ${code}
+      } finally {
+        clearTimeout(_stepTimer);
+      }
+    })();
+    `).join("\n")}
 
     // Post-execution page state check
     await checkPageState();

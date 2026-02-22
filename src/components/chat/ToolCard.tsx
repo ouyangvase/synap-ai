@@ -139,19 +139,22 @@ export function ToolCard({ toolRun, conversationId }: Props) {
       const steps = input?.steps || [];
       const url = input?.url || "";
 
+      // Convert daily time (HH:MM in Asia/KL = UTC+8) to UTC cron
+      const [hours, minutes] = jobTime.split(":").map(Number);
+      const utcHours = (hours - 8 + 24) % 24;
+      const cronSchedule = `${minutes} ${utcHours} * * *`;
+
       await supabase.from("jobs").insert({
-        user_id: user.id,
         name: jobName.trim(),
-        task_type: "browser_flow",
-        config: { url, steps },
+        description: `Browser flow saved from chat: ${url}`,
+        schedule: cronSchedule,
+        workflow_name: "browser_flow",
+        workflow_payload: { url, steps, task_type: "browser_flow" },
         steps: steps,
-        schedule_type: "daily",
-        daily_time: jobTime,
-        timezone: "Asia/Kuala_Lumpur",
         is_active: true,
       });
 
-      toast({ title: "Job saved", description: `"${jobName}" scheduled daily at ${jobTime}` });
+      toast({ title: "Job saved", description: `"${jobName}" scheduled daily at ${jobTime} (Asia/KL)` });
       setShowSaveJob(false);
       setJobName("");
     } catch (err: any) {

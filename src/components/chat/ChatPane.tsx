@@ -1,9 +1,12 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Send, Bot, Plus, Monitor, X, Image as ImageIcon, Globe } from "lucide-react";
+import {
+  Send, Bot, Plus, Monitor, X, Image as ImageIcon, Globe,
+  Hand, Play, Loader2, RefreshCw
+} from "lucide-react";
 import { ToolCard } from "./ToolCard";
 import { MessageBubble } from "./MessageBubble";
 import { useToast } from "@/hooks/use-toast";
@@ -49,11 +52,19 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
   const [screenshots, setScreenshots] = useState<{ data: string; url: string; title: string; time: string }[]>([]);
   const [screenshotPanelOpen, setScreenshotPanelOpen] = useState(false);
   const [browserUrl, setBrowserUrl] = useState<string | null>(null);
+  const [takeOverMode, setTakeOverMode] = useState(false);
+  const [livePolling, setLivePolling] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const scrollToBottom = useCallback(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, []);
+
+  // Detect if any browser tool is currently running
+  const hasRunningBrowserTool = useMemo(() => {
+    return toolRuns.some(r => r.status === "running");
+  }, [toolRuns]);
 
   // Fetch messages
   const fetchMessages = useCallback(async () => {
@@ -106,6 +117,30 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
 
   useEffect(() => { scrollToBottom(); }, [messages, streamingContent, scrollToBottom]);
 
+  // Live screenshot polling: when a browser tool is running, poll tool_runs for updates
+  useEffect(() => {
+    if (hasRunningBrowserTool && !takeOverMode) {
+      setLivePolling(true);
+      setScreenshotPanelOpen(true);
+      // Poll every 3 seconds for updated tool run data (screenshots, step progress)
+      pollRef.current = setInterval(() => {
+        fetchToolRuns();
+      }, 3000);
+    } else {
+      setLivePolling(false);
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    }
+    return () => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, [hasRunningBrowserTool, takeOverMode, fetchToolRuns]);
+
   // Detect screenshots and browser URL from tool runs
   useEffect(() => {
     const newScreenshots: { data: string; url: string; title: string; time: string }[] = [];
@@ -140,6 +175,87 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
     }
     if (latestUrl) setBrowserUrl(latestUrl);
   }, [toolRuns]);
+
+  // Take Over: pause automation by flagging via a user message
+  const handleTakeOver = async () => {
+    if (!conversationId || !user) return;
+    setTakeOverMode(true);
+    toast({ title: "Take Over", description: "Automation paused. You have manual control." });
+  };
+
+  // Resume Auto: send a resume signal
+  const handleResume = async () => {
+    if (!conversationId || !user) return;
+    setTakeOverMode(false);
+    // Insert a user message to trigger the agent to continue
+    await supabase.from("messages").insert({
+      conversation_id: conversationId,
+      user_id: user.id,
+      role: "user",
+      content: "Continue from where you left off. Resume the automation.",
+    });
+    toast({ title: "Resumed", description: "Automation resumed." });
+    // Trigger chat to continue
+    setInput("");
+    setIsStreaming(true);
+    setStreamingContent("");
+    try {
+      const CHAT_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/chat`;
+      const { data: { session } } = await supabase.auth.getSession();
+      const resp = await fetch(CHAT_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session?.access_token ?? import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+          apikey: import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
+        },
+        body: JSON.stringify({ conversation_id: conversationId }),
+      });
+      if (resp.ok && resp.body) {
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let assistantSoFar = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let newlineIndex: number;
+          while ((newlineIndex = buffer.indexOf("\n")) !== -1) {
+            let line = buffer.slice(0, newlineIndex);
+            buffer = buffer.slice(newlineIndex + 1);
+            if (line.endsWith("\r")) line = line.slice(0, -1);
+            if (line.startsWith(":") || line.trim() === "") continue;
+            if (!line.startsWith("data: ")) continue;
+            const jsonStr = line.slice(6).trim();
+            if (jsonStr === "[DONE]") break;
+            try {
+              const parsed = JSON.parse(jsonStr);
+              if (parsed.type === "tool_call" || parsed.type === "approval_required" || parsed.type === "tool_result") {
+                await fetchToolRuns();
+                continue;
+              }
+              const content = parsed.choices?.[0]?.delta?.content;
+              if (content) {
+                assistantSoFar += content;
+                setStreamingContent(assistantSoFar);
+              }
+            } catch {
+              buffer = line + "\n" + buffer;
+              break;
+            }
+          }
+        }
+      }
+      await fetchMessages();
+      await fetchToolRuns();
+    } catch (err: any) {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    } finally {
+      setIsStreaming(false);
+      setStreamingContent("");
+    }
+  };
 
   const handleSend = async () => {
     if (!input.trim() || !conversationId || !user || isStreaming) return;
@@ -264,9 +380,12 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
         {/* Browser state indicator */}
         {browserUrl && (
           <div className="px-4 py-1.5 border-b border-border glass-subtle flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+            <div className={`w-2 h-2 rounded-full ${hasRunningBrowserTool ? "bg-amber-500" : "bg-emerald-500"} animate-pulse`} />
             <Globe className="w-3 h-3 text-muted-foreground" />
             <span className="text-[11px] text-muted-foreground truncate flex-1">{browserUrl}</span>
+            {hasRunningBrowserTool && (
+              <span className="text-[10px] text-amber-500 font-medium">Executing...</span>
+            )}
             {latestScreenshot && !screenshotPanelOpen && (
               <Button
                 variant="ghost"
@@ -277,6 +396,50 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
                 View
               </Button>
             )}
+          </div>
+        )}
+
+        {/* Take Over / Resume control bar */}
+        {(hasRunningBrowserTool || takeOverMode) && (
+          <div className="px-4 py-2 border-b border-border glass-subtle flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              {takeOverMode ? (
+                <>
+                  <Hand className="w-4 h-4 text-amber-500" />
+                  <span className="text-xs font-medium text-amber-500">Manual Control Active</span>
+                </>
+              ) : (
+                <>
+                  <Loader2 className="w-4 h-4 text-primary animate-spin" />
+                  <span className="text-xs font-medium text-muted-foreground">Browser automation running</span>
+                </>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              {!takeOverMode && hasRunningBrowserTool && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleTakeOver}
+                  className="h-7 text-xs gap-1 rounded-xl border-amber-500/30 text-amber-600 hover:bg-amber-500/10"
+                >
+                  <Hand className="w-3 h-3" />
+                  Take Over
+                </Button>
+              )}
+              {takeOverMode && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleResume}
+                  disabled={isStreaming}
+                  className="h-7 text-xs gap-1 rounded-xl border-emerald-500/30 text-emerald-600 hover:bg-emerald-500/10"
+                >
+                  <Play className="w-3 h-3" />
+                  Resume Auto
+                </Button>
+              )}
+            </div>
           </div>
         )}
 
@@ -352,7 +515,7 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
           <Input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Message the agent…"
+            placeholder={takeOverMode ? "Type instructions for the agent..." : "Message the agent…"}
             disabled={isStreaming}
             className="flex-1 bg-secondary/50 border-border rounded-xl h-11"
           />
@@ -370,6 +533,12 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
             <div className="flex items-center gap-2 min-w-0">
               <ImageIcon className="w-4 h-4 text-primary shrink-0" />
               <span className="text-xs font-medium shrink-0">Browser View</span>
+              {livePolling && (
+                <span className="flex items-center gap-1 text-[10px] text-amber-500">
+                  <RefreshCw className="w-3 h-3 animate-spin" />
+                  Live
+                </span>
+              )}
               {screenshots.length > 0 && screenshots[screenshots.length - 1].url && (
                 <span className="text-[10px] text-muted-foreground truncate">
                   {screenshots[screenshots.length - 1].url}
@@ -392,11 +561,19 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
           </div>
           <div className="flex-1 overflow-auto p-3 space-y-3">
             {/* Show latest screenshot large */}
-            <img
-              src={`data:image/png;base64,${latestScreenshot}`}
-              alt="Browser screenshot"
-              className="max-w-full rounded-xl border border-border elevation-1"
-            />
+            <div className="relative">
+              <img
+                src={`data:image/png;base64,${latestScreenshot}`}
+                alt="Browser screenshot"
+                className="max-w-full rounded-xl border border-border elevation-1"
+              />
+              {livePolling && (
+                <div className="absolute top-2 right-2 flex items-center gap-1 bg-black/60 text-white text-[9px] px-2 py-0.5 rounded-full">
+                  <div className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />
+                  LIVE
+                </div>
+              )}
+            </div>
             {/* Show older screenshots as thumbnails */}
             {screenshots.length > 1 && (
               <div className="space-y-1">
