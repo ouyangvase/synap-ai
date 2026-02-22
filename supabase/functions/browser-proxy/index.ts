@@ -706,8 +706,8 @@ Deno.serve(async (req) => {
         const script = buildCompositeScript(url, steps);
 
         // ── Part B: Watchdog timeout ──
-        // Total timeout scales with step count (20s base + 8s per step, max 120s)
-        const watchdogTimeout = Math.min(20_000 + steps.length * 8_000, 120_000);
+        // Total timeout scales with step count (30s base + 12s per step, max 180s)
+        const watchdogTimeout = Math.min(30_000 + steps.length * 12_000, 180_000);
 
         const resp = await fetchWithTimeout(
           `${bl.baseUrl}/function?token=${bl.token}`,

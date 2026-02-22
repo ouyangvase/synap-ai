@@ -484,11 +484,22 @@ async function executeToolRun(
       input,
     };
 
+    // Dynamic timeout: browser_do needs much more time for multi-step flows
+    const isBrowserDo = tool.name === "browser_do";
+    const stepCount = isBrowserDo && Array.isArray(input.steps) ? input.steps.length : 0;
+    // browser_do: 30s base + 15s per step, min 90s, max 240s
+    // other tools: use endpoint config
+    const effectiveTimeout = isBrowserDo
+      ? Math.min(Math.max(30_000 + stepCount * 15_000, 90_000), 240_000)
+      : ep.timeout_ms;
+
     let lastError = "";
-    for (let attempt = 0; attempt <= ep.max_retries; attempt++) {
+    const maxRetries = isBrowserDo ? 2 : ep.max_retries; // browser_do gets 2 retries
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         const ac = new AbortController();
-        const timeout = setTimeout(() => ac.abort(), ep.timeout_ms);
+        const timeout = setTimeout(() => ac.abort(), effectiveTimeout);
         const resp = await fetch(resolvedUrl, {
           method: ep.http_method,
           headers: {
@@ -506,8 +517,9 @@ async function executeToolRun(
 
         if (!resp.ok) {
           lastError = `HTTP ${resp.status}: ${await resp.text()}`;
-          if (resp.status >= 500 && attempt < ep.max_retries) {
-            await delay(Math.pow(2, attempt) * 500 + Math.random() * 500);
+          if (resp.status >= 500 && attempt < maxRetries) {
+            console.warn(`[executeToolRun] ${tool.name} attempt ${attempt} failed (${resp.status}), retrying...`);
+            await delay(Math.pow(2, attempt) * 1000 + Math.random() * 1000);
             continue;
           }
           throw new Error(lastError);
@@ -527,16 +539,38 @@ async function executeToolRun(
         return;
       } catch (err: any) {
         if (err.name === "AbortError") {
-          lastError = "Request timed out";
-          if (attempt < ep.max_retries) { await delay(Math.pow(2, attempt) * 500); continue; }
+          lastError = `Browser action timed out after ${effectiveTimeout / 1000}s (attempt ${attempt + 1}/${maxRetries + 1})`;
+          console.warn(`[executeToolRun] ${tool.name} aborted on attempt ${attempt}:`, lastError);
+          if (attempt < maxRetries) {
+            await delay(Math.pow(2, attempt) * 1000);
+            continue;
+          }
+        } else {
+          lastError = err.message;
+          if (attempt < maxRetries) {
+            console.warn(`[executeToolRun] ${tool.name} error on attempt ${attempt}, retrying:`, lastError);
+            await delay(Math.pow(2, attempt) * 1000);
+            continue;
+          }
         }
-        lastError = err.message;
       }
     }
 
+    // If all retries exhausted, store a helpful error message
+    const failureMsg = isBrowserDo
+      ? `${lastError}. The browser flow took too long. Try splitting into fewer steps per browser_do call, or ensure each step has proper waits.`
+      : lastError;
+
     await supabase.from("tool_runs").update({
-      status: "failed", error: lastError, completed_at: new Date().toISOString(),
+      status: "failed", error: failureMsg, completed_at: new Date().toISOString(),
     }).eq("id", toolRunId);
+
+    // Also insert a tool message so the LLM knows about the failure and can self-correct
+    const { data: runData } = await supabase.from("tool_runs").select("tool_call_id").eq("id", toolRunId).single();
+    await supabase.from("messages").insert({
+      conversation_id: conversationId, user_id: userId,
+      role: "tool", content: `Tool execution failed: ${failureMsg}`, tool_call_id: runData?.tool_call_id,
+    });
   } catch (e: any) {
     await supabase.from("tool_runs").update({
       status: "failed", error: e.message, completed_at: new Date().toISOString(),
