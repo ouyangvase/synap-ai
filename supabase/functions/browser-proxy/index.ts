@@ -2307,7 +2307,9 @@ function buildCompositeScript(
         stepCode.push(`
           for (let _navR = 0; _navR < 2; _navR++) {
             try {
-              await page.goto(${url}, { waitUntil: "domcontentloaded", timeout: 90000 });
+              let _navUrl = ${url};
+              if (_navUrl && !_navUrl.startsWith("http://") && !_navUrl.startsWith("https://")) _navUrl = "https://" + _navUrl;
+              await page.goto(_navUrl, { waitUntil: "domcontentloaded", timeout: 90000 });
               await new Promise(r => setTimeout(r, 1500));
               // Wait for SPA content to settle (loading indicators to disappear)
               for (let _navSpa = 0; _navSpa < 5; _navSpa++) {
@@ -2318,7 +2320,7 @@ function buildCompositeScript(
                 if (!isLoading) break;
                 await new Promise(r => setTimeout(r, 2000));
               }
-              stepResults.push("Navigated to " + ${url});
+              stepResults.push("Navigated to " + _navUrl);
               break;
             } catch(_navE) {
               if (_navR === 0) {
@@ -3271,20 +3273,32 @@ function buildCompositeScript(
 
     // Navigate to start URL with retry (90s timeout, 1 retry)
     ${startUrl ? `
-    for (let _navRetry = 0; _navRetry < 2; _navRetry++) {
-      try {
-        await page.goto(${JSON.stringify(startUrl)}, { waitUntil: "domcontentloaded", timeout: 90000 });
-        await new Promise(r => setTimeout(r, 1500)); // brief settle
-        stepResults.push("Navigated to " + ${JSON.stringify(startUrl)});
-        break;
-      } catch(_navErr) {
-        if (_navRetry === 0) {
-          stepResults.push("WARNING: Navigation retry after: " + _navErr.message);
-          await new Promise(r => setTimeout(r, 2000));
-        } else {
-          stepResults.push("FAIL navigate [${startUrl}] " + _navErr.message);
-          // Take error screenshot before giving up
-          try { screenshot = await page.screenshot({ encoding: "base64", fullPage: false }); } catch(_) {}
+    {
+      let _startNavUrl = ${JSON.stringify(startUrl)};
+      if (_startNavUrl && !_startNavUrl.startsWith("http://") && !_startNavUrl.startsWith("https://")) _startNavUrl = "https://" + _startNavUrl;
+      for (let _navRetry = 0; _navRetry < 2; _navRetry++) {
+        try {
+          await page.goto(_startNavUrl, { waitUntil: "domcontentloaded", timeout: 90000 });
+          await new Promise(r => setTimeout(r, 1500)); // brief settle
+          // Wait for SPA content to settle
+          for (let _startSpa = 0; _startSpa < 5; _startSpa++) {
+            const isLoading = await page.evaluate(() => {
+              const body = document.body.innerText.toLowerCase();
+              return body.includes("loading your profile") || body.includes("loading...") || !!document.querySelector("[class*='spinner'], .animate-spin");
+            }).catch(() => false);
+            if (!isLoading) break;
+            await new Promise(r => setTimeout(r, 2000));
+          }
+          stepResults.push("Navigated to " + _startNavUrl);
+          break;
+        } catch(_navErr) {
+          if (_navRetry === 0) {
+            stepResults.push("WARNING: Navigation retry after: " + _navErr.message);
+            await new Promise(r => setTimeout(r, 2000));
+          } else {
+            stepResults.push("FAIL navigate [" + _startNavUrl + "] " + _navErr.message);
+            try { screenshot = await page.screenshot({ encoding: "base64", fullPage: false }); } catch(_) {}
+          }
         }
       }
     }
