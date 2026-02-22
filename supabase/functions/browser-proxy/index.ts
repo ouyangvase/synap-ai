@@ -2109,7 +2109,19 @@ function buildCompositeScript(
           try {
             const ph = ${JSON.stringify((step.placeholder as string) || "")};
             const val = ${JSON.stringify((step.value as string) || "")};
-            const filled = await helpers.fillByPlaceholder(page, ph, val);
+            // Retry with backoff for SPA pages that are still loading
+            let filled = false;
+            for (let _fpRetry = 0; _fpRetry < 5; _fpRetry++) {
+              filled = await helpers.fillByPlaceholder(page, ph, val);
+              if (filled) break;
+              // Check if page is still loading (SPA spinner/skeleton)
+              const isLoading = await page.evaluate(() => {
+                const body = document.body.innerText.toLowerCase();
+                return body.includes("loading") || body.includes("skeleton") || !!document.querySelector("[class*='spinner'], [class*='loading'], [class*='skeleton'], .animate-spin, .animate-pulse");
+              }).catch(() => false);
+              if (!isLoading && _fpRetry >= 1) break; // page loaded but input not found
+              await new Promise(r => setTimeout(r, 2000 * (_fpRetry + 1)));
+            }
             if (filled) {
               stepResults.push("Filled input with placeholder \\"" + ph + "\\"");
             } else {
@@ -2169,6 +2181,15 @@ function buildCompositeScript(
             if (clicked) {
               await new Promise(r => setTimeout(r, 1000));
               await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 5000 }).catch(() => {});
+              // Wait for SPA content to settle (loading spinners to disappear)
+              for (let _spaW = 0; _spaW < 8; _spaW++) {
+                const isLoading = await page.evaluate(() => {
+                  const body = document.body.innerText.toLowerCase();
+                  return body.includes("loading your profile") || body.includes("loading...") || !!document.querySelector("[class*='spinner'], .animate-spin");
+                }).catch(() => false);
+                if (!isLoading) break;
+                await new Promise(r => setTimeout(r, 2000));
+              }
               stepResults.push("Clicked element with text \\"" + txt + "\\"");
             } else {
               const domHint = await helpers.getAvailableButtons(page);
@@ -2190,6 +2211,15 @@ function buildCompositeScript(
             if (clicked) {
               await new Promise(r => setTimeout(r, 1000));
               await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 5000 }).catch(() => {});
+              // Wait for SPA content to settle
+              for (let _spaW = 0; _spaW < 5; _spaW++) {
+                const isLoading = await page.evaluate(() => {
+                  const body = document.body.innerText.toLowerCase();
+                  return body.includes("loading your profile") || body.includes("loading...") || !!document.querySelector("[class*='spinner'], .animate-spin");
+                }).catch(() => false);
+                if (!isLoading) break;
+                await new Promise(r => setTimeout(r, 2000));
+              }
               stepResults.push("Clicked " + role + " \\"" + name + "\\"");
             } else {
               const domHint = await helpers.getAvailableButtons(page);
@@ -2210,6 +2240,15 @@ function buildCompositeScript(
             if (clicked) {
               await new Promise(r => setTimeout(r, 1000));
               await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 5000 }).catch(() => {});
+              // Wait for SPA content to settle
+              for (let _spaW = 0; _spaW < 5; _spaW++) {
+                const isLoading = await page.evaluate(() => {
+                  const body = document.body.innerText.toLowerCase();
+                  return body.includes("loading your profile") || body.includes("loading...") || !!document.querySelector("[class*='spinner'], .animate-spin");
+                }).catch(() => false);
+                if (!isLoading) break;
+                await new Promise(r => setTimeout(r, 2000));
+              }
               stepResults.push("Clicked best match for intent \\"" + intent + "\\"");
             } else {
               const domHint = await helpers.getAvailableButtons(page);
@@ -2269,7 +2308,16 @@ function buildCompositeScript(
           for (let _navR = 0; _navR < 2; _navR++) {
             try {
               await page.goto(${url}, { waitUntil: "domcontentloaded", timeout: 90000 });
-              await new Promise(r => setTimeout(r, 1000));
+              await new Promise(r => setTimeout(r, 1500));
+              // Wait for SPA content to settle (loading indicators to disappear)
+              for (let _navSpa = 0; _navSpa < 5; _navSpa++) {
+                const isLoading = await page.evaluate(() => {
+                  const body = document.body.innerText.toLowerCase();
+                  return body.includes("loading your profile") || body.includes("loading...") || !!document.querySelector("[class*='spinner'], .animate-spin");
+                }).catch(() => false);
+                if (!isLoading) break;
+                await new Promise(r => setTimeout(r, 2000));
+              }
               stepResults.push("Navigated to " + ${url});
               break;
             } catch(_navE) {
@@ -2417,6 +2465,37 @@ function buildCompositeScript(
         `);
         break;
 
+      // ── Wait for SPA content to load (loading spinners to disappear, real content to appear) ──
+      case "wait_for_spa_content":
+        stepCode.push(`
+          try {
+            const maxWait = ${Number(step.timeout) || 20000};
+            const checkInterval = 2000;
+            const maxChecks = Math.ceil(maxWait / checkInterval);
+            let loaded = false;
+            for (let _spaCheck = 0; _spaCheck < maxChecks; _spaCheck++) {
+              await new Promise(r => setTimeout(r, checkInterval));
+              const status = await page.evaluate(() => {
+                const body = document.body.innerText.toLowerCase();
+                const hasSpinner = !!document.querySelector("[class*='spinner'], .animate-spin, [class*='skeleton']");
+                const hasLoadingText = body.includes("loading your profile") || body.includes("loading...");
+                const hasRealContent = document.querySelectorAll("table tr, [class*='row'], [class*='card']").length > 2;
+                return { isLoading: hasSpinner || hasLoadingText, hasRealContent };
+              }).catch(() => ({ isLoading: false, hasRealContent: false }));
+              if (!status.isLoading && status.hasRealContent) {
+                loaded = true;
+                break;
+              }
+              if (!status.isLoading && _spaCheck >= 2) {
+                loaded = true; // No loading indicator, assume content is ready
+                break;
+              }
+            }
+            stepResults.push(loaded ? "SPA content loaded" : "SPA content wait timed out (may still work)");
+          } catch(e) { stepResults.push("wait_for_spa_content: " + e.message); }
+        `);
+        break;
+
       // ── URL guard: verify current URL, retry click or navigate directly ──
       case "url_guard": {
         const expectedPath = JSON.stringify((step.expected_path as string) || "");
@@ -2444,6 +2523,15 @@ function buildCompositeScript(
                   } else if (fallback) {
                     await page.goto(fallback, { waitUntil: "domcontentloaded", timeout: 90000 });
                     await new Promise(r => setTimeout(r, 2000));
+                    // Wait for SPA to finish loading
+                    for (let _ugSpa = 0; _ugSpa < 6; _ugSpa++) {
+                      const isLoading = await page.evaluate(() => {
+                        const body = document.body.innerText.toLowerCase();
+                        return body.includes("loading your profile") || body.includes("loading...") || !!document.querySelector("[class*='spinner'], .animate-spin");
+                      }).catch(() => false);
+                      if (!isLoading) break;
+                      await new Promise(r => setTimeout(r, 2000));
+                    }
                     stepResults.push("URL guard recovered via direct navigation to " + fallback);
                   } else {
                     stepResults.push("FAIL url_guard: still on " + afterRetry + " after retry");
@@ -2451,12 +2539,28 @@ function buildCompositeScript(
                 } else if (fallback) {
                   await page.goto(fallback, { waitUntil: "domcontentloaded", timeout: 90000 });
                   await new Promise(r => setTimeout(r, 2000));
+                  for (let _ugSpa = 0; _ugSpa < 6; _ugSpa++) {
+                    const isLoading = await page.evaluate(() => {
+                      const body = document.body.innerText.toLowerCase();
+                      return body.includes("loading your profile") || body.includes("loading...") || !!document.querySelector("[class*='spinner'], .animate-spin");
+                    }).catch(() => false);
+                    if (!isLoading) break;
+                    await new Promise(r => setTimeout(r, 2000));
+                  }
                   stepResults.push("URL guard recovered via direct navigation to " + fallback);
                 }
               } else if (fallback) {
                 // Strategy 2: direct navigation
                 await page.goto(fallback, { waitUntil: "domcontentloaded", timeout: 90000 });
                 await new Promise(r => setTimeout(r, 2000));
+                for (let _ugSpa2 = 0; _ugSpa2 < 6; _ugSpa2++) {
+                  const isLoading = await page.evaluate(() => {
+                    const body = document.body.innerText.toLowerCase();
+                    return body.includes("loading your profile") || body.includes("loading...") || !!document.querySelector("[class*='spinner'], .animate-spin");
+                  }).catch(() => false);
+                  if (!isLoading) break;
+                  await new Promise(r => setTimeout(r, 2000));
+                }
                 stepResults.push("URL guard: navigated directly to " + fallback);
               } else {
                 stepResults.push("FAIL url_guard: no fallback URL provided, stuck on " + currentUrl);
@@ -2477,51 +2581,58 @@ function buildCompositeScript(
         stepCode.push(`
           try {
             const searchText = ${searchText};
-            await new Promise(r => setTimeout(r, 1000)); // let table render
-            const rowInfo = await page.evaluate((txt) => {
-              // Strategy 1: find in <tr> elements
-              const rows = document.querySelectorAll("tr");
-              for (const row of rows) {
-                if (row.textContent && row.textContent.includes(txt)) {
-                  // Get cell texts for context
-                  const cells = Array.from(row.querySelectorAll("td, th")).map(c => c.textContent.trim().substring(0, 80));
-                  const buttons = Array.from(row.querySelectorAll("button, a, [role=button]")).map(b => ({
-                    text: (b.textContent || "").trim().substring(0, 40),
-                    tag: b.tagName
-                  }));
-                  return { found: true, type: "tr", cells, buttons, rowIndex: Array.from(row.parentElement.children).indexOf(row) };
-                }
-              }
-              // Strategy 2: find in div-based rows (common in modern UIs)
-              const divRows = document.querySelectorAll("[class*='row'], [class*='item'], [class*='order'], [class*='card'], [role='row']");
-              for (const row of divRows) {
-                if (row.textContent && row.textContent.includes(txt)) {
-                  const text = row.textContent.trim().substring(0, 300);
-                  const buttons = Array.from(row.querySelectorAll("button, a, [role=button]")).map(b => ({
-                    text: (b.textContent || "").trim().substring(0, 40),
-                    tag: b.tagName
-                  }));
-                  return { found: true, type: "div", text, buttons };
-                }
-              }
-              // Strategy 3: general search
-              const allEls = document.querySelectorAll("*");
-              for (const el of allEls) {
-                if (el.children.length > 2 && el.textContent.includes(txt)) {
-                  const depth = 0;
-                  let p = el;
-                  while (p.parentElement && p.parentElement !== document.body) { p = p.parentElement; }
-                  const buttons = Array.from(el.querySelectorAll("button, a, [role=button]")).map(b => ({
-                    text: (b.textContent || "").trim().substring(0, 40),
-                    tag: b.tagName
-                  }));
-                  if (buttons.length > 0) {
-                    return { found: true, type: "container", text: el.textContent.trim().substring(0, 300), buttons };
+            // Retry with backoff for SPA pages still loading
+            let rowInfo = { found: false };
+            for (let _frRetry = 0; _frRetry < 6; _frRetry++) {
+              await new Promise(r => setTimeout(r, _frRetry === 0 ? 1500 : 3000)); // let table render
+              rowInfo = await page.evaluate((txt) => {
+                // Strategy 1: find in <tr> elements
+                const rows = document.querySelectorAll("tr");
+                for (const row of rows) {
+                  if (row.textContent && row.textContent.includes(txt)) {
+                    const cells = Array.from(row.querySelectorAll("td, th")).map(c => c.textContent.trim().substring(0, 80));
+                    const buttons = Array.from(row.querySelectorAll("button, a, [role=button]")).map(b => ({
+                      text: (b.textContent || "").trim().substring(0, 40),
+                      tag: b.tagName
+                    }));
+                    return { found: true, type: "tr", cells, buttons, rowIndex: Array.from(row.parentElement.children).indexOf(row) };
                   }
                 }
-              }
-              return { found: false };
-            }, searchText);
+                // Strategy 2: find in div-based rows (common in modern UIs)
+                const divRows = document.querySelectorAll("[class*='row'], [class*='item'], [class*='order'], [class*='card'], [role='row']");
+                for (const row of divRows) {
+                  if (row.textContent && row.textContent.includes(txt)) {
+                    const text = row.textContent.trim().substring(0, 300);
+                    const buttons = Array.from(row.querySelectorAll("button, a, [role=button]")).map(b => ({
+                      text: (b.textContent || "").trim().substring(0, 40),
+                      tag: b.tagName
+                    }));
+                    return { found: true, type: "div", text, buttons };
+                  }
+                }
+                // Strategy 3: general search
+                const allEls = document.querySelectorAll("*");
+                for (const el of allEls) {
+                  if (el.children.length > 2 && el.textContent.includes(txt)) {
+                    const buttons = Array.from(el.querySelectorAll("button, a, [role=button]")).map(b => ({
+                      text: (b.textContent || "").trim().substring(0, 40),
+                      tag: b.tagName
+                    }));
+                    if (buttons.length > 0) {
+                      return { found: true, type: "container", text: el.textContent.trim().substring(0, 300), buttons };
+                    }
+                  }
+                }
+                return { found: false };
+              }, searchText);
+              if (rowInfo.found) break;
+              // Check if page is still loading
+              const isLoading = await page.evaluate(() => {
+                const body = document.body.innerText.toLowerCase();
+                return body.includes("loading") || body.includes("skeleton") || !!document.querySelector("[class*='spinner'], [class*='loading'], [class*='skeleton'], .animate-spin, .animate-pulse");
+              }).catch(() => false);
+              if (!isLoading && _frRetry >= 1) break; // page loaded but row not found
+            }
             if (rowInfo.found) {
               stepResults.push("Found row containing \\"" + searchText + "\\" (type: " + rowInfo.type + "). Buttons: " + JSON.stringify(rowInfo.buttons || []) + ". Cells: " + JSON.stringify(rowInfo.cells || []).substring(0, 200));
             } else {
@@ -2544,41 +2655,48 @@ function buildCompositeScript(
           try {
             const rowTxt = ${rowText};
             const btnTxt = ${buttonText};
-            const clicked = await page.evaluate((rowSearch, btnSearch) => {
-              // Find the row containing rowSearch text
-              const allContainers = [...document.querySelectorAll("tr, [class*='row'], [class*='item'], [class*='order'], [class*='card'], [role='row']")];
-              for (const container of allContainers) {
-                if (!container.textContent || !container.textContent.includes(rowSearch)) continue;
-                // Find clickable element matching btnSearch
-                const clickables = container.querySelectorAll("button, a, [role=button], input[type=button], input[type=submit]");
-                for (const btn of clickables) {
-                  const text = (btn.textContent || btn.value || "").trim().toLowerCase();
-                  if (text.includes(btnSearch.toLowerCase())) {
-                    btn.click();
-                    return { clicked: true, text: text.substring(0, 60) };
-                  }
-                }
-                // Fallback: click the row itself if no matching button
-                if (!btnSearch) {
-                  container.click();
-                  return { clicked: true, text: "row clicked directly" };
-                }
-                // Try partial match
-                for (const btn of clickables) {
-                  const text = (btn.textContent || btn.value || "").trim().toLowerCase();
-                  if (text.length > 0) {
-                    // Check if button text is related to the action
-                    const words = btnSearch.toLowerCase().split(/\\s+/);
-                    if (words.some(w => text.includes(w))) {
+            let clicked = { clicked: false, rowNotFound: true };
+            // Retry with backoff for SPA pages still loading
+            for (let _cirRetry = 0; _cirRetry < 5; _cirRetry++) {
+              if (_cirRetry > 0) await new Promise(r => setTimeout(r, 3000));
+              clicked = await page.evaluate((rowSearch, btnSearch) => {
+                const allContainers = [...document.querySelectorAll("tr, [class*='row'], [class*='item'], [class*='order'], [class*='card'], [role='row']")];
+                for (const container of allContainers) {
+                  if (!container.textContent || !container.textContent.includes(rowSearch)) continue;
+                  const clickables = container.querySelectorAll("button, a, [role=button], input[type=button], input[type=submit]");
+                  for (const btn of clickables) {
+                    const text = (btn.textContent || btn.value || "").trim().toLowerCase();
+                    if (text.includes(btnSearch.toLowerCase())) {
                       btn.click();
-                      return { clicked: true, text: "partial match: " + text.substring(0, 60) };
+                      return { clicked: true, text: text.substring(0, 60) };
                     }
                   }
+                  if (!btnSearch) {
+                    container.click();
+                    return { clicked: true, text: "row clicked directly" };
+                  }
+                  for (const btn of clickables) {
+                    const text = (btn.textContent || btn.value || "").trim().toLowerCase();
+                    if (text.length > 0) {
+                      const words = btnSearch.toLowerCase().split(/\\s+/);
+                      if (words.some(w => text.includes(w))) {
+                        btn.click();
+                        return { clicked: true, text: "partial match: " + text.substring(0, 60) };
+                      }
+                    }
+                  }
+                  return { clicked: false, available: Array.from(clickables).map(b => (b.textContent || "").trim().substring(0, 40)).filter(t => t) };
                 }
-                return { clicked: false, available: Array.from(clickables).map(b => (b.textContent || "").trim().substring(0, 40)).filter(t => t) };
-              }
-              return { clicked: false, rowNotFound: true };
-            }, rowTxt, btnTxt);
+                return { clicked: false, rowNotFound: true };
+              }, rowTxt, btnTxt);
+              if (clicked.clicked || !clicked.rowNotFound) break;
+              // Check if page is still loading
+              const isLoading = await page.evaluate(() => {
+                const body = document.body.innerText.toLowerCase();
+                return body.includes("loading") || body.includes("skeleton") || !!document.querySelector("[class*='spinner'], [class*='loading'], [class*='skeleton'], .animate-spin, .animate-pulse");
+              }).catch(() => false);
+              if (!isLoading && _cirRetry >= 1) break;
+            }
             if (clicked.clicked) {
               await new Promise(r => setTimeout(r, 1500));
               await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 5000 }).catch(() => {});
