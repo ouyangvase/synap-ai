@@ -2111,7 +2111,7 @@ function buildCompositeScript(
             const val = ${JSON.stringify((step.value as string) || "")};
             // Retry with backoff for SPA pages that are still loading
             let filled = false;
-            for (let _fpRetry = 0; _fpRetry < 5; _fpRetry++) {
+            for (let _fpRetry = 0; _fpRetry < 3; _fpRetry++) {
               filled = await helpers.fillByPlaceholder(page, ph, val);
               if (filled) break;
               // Check if page is still loading (SPA spinner/skeleton)
@@ -2120,7 +2120,7 @@ function buildCompositeScript(
                 return body.includes("loading") || body.includes("skeleton") || !!document.querySelector("[class*='spinner'], [class*='loading'], [class*='skeleton'], .animate-spin, .animate-pulse");
               }).catch(() => false);
               if (!isLoading && _fpRetry >= 1) break; // page loaded but input not found
-              await new Promise(r => setTimeout(r, 2000 * (_fpRetry + 1)));
+              await new Promise(r => setTimeout(r, 1500));
             }
             if (filled) {
               stepResults.push("Filled input with placeholder \\"" + ph + "\\"");
@@ -2182,7 +2182,7 @@ function buildCompositeScript(
               await new Promise(r => setTimeout(r, 1000));
               await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 5000 }).catch(() => {});
               // Wait for SPA content to settle (loading spinners to disappear)
-              for (let _spaW = 0; _spaW < 8; _spaW++) {
+              for (let _spaW = 0; _spaW < 4; _spaW++) {
                 const isLoading = await page.evaluate(() => {
                   const body = document.body.innerText.toLowerCase();
                   return body.includes("loading your profile") || body.includes("loading...") || !!document.querySelector("[class*='spinner'], .animate-spin");
@@ -2309,10 +2309,10 @@ function buildCompositeScript(
             try {
               let _navUrl = ${url};
               if (_navUrl && !_navUrl.startsWith("http://") && !_navUrl.startsWith("https://")) _navUrl = "https://" + _navUrl;
-              await page.goto(_navUrl, { waitUntil: "domcontentloaded", timeout: 90000 });
-              await new Promise(r => setTimeout(r, 1500));
+              await page.goto(_navUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+              await new Promise(r => setTimeout(r, 1000));
               // Wait for SPA content to settle (loading indicators to disappear)
-              for (let _navSpa = 0; _navSpa < 5; _navSpa++) {
+              for (let _navSpa = 0; _navSpa < 3; _navSpa++) {
                 const isLoading = await page.evaluate(() => {
                   const body = document.body.innerText.toLowerCase();
                   return body.includes("loading your profile") || body.includes("loading...") || !!document.querySelector("[class*='spinner'], .animate-spin");
@@ -2523,10 +2523,10 @@ function buildCompositeScript(
                   if (afterRetry.includes(expected)) {
                     stepResults.push("URL guard recovered via retry click: " + afterRetry);
                   } else if (fallback) {
-                    await page.goto(fallback, { waitUntil: "domcontentloaded", timeout: 90000 });
+                    await page.goto(fallback, { waitUntil: "domcontentloaded", timeout: 30000 });
                     await new Promise(r => setTimeout(r, 2000));
                     // Wait for SPA to finish loading
-                    for (let _ugSpa = 0; _ugSpa < 6; _ugSpa++) {
+                    for (let _ugSpa = 0; _ugSpa < 3; _ugSpa++) {
                       const isLoading = await page.evaluate(() => {
                         const body = document.body.innerText.toLowerCase();
                         return body.includes("loading your profile") || body.includes("loading...") || !!document.querySelector("[class*='spinner'], .animate-spin");
@@ -2539,9 +2539,9 @@ function buildCompositeScript(
                     stepResults.push("FAIL url_guard: still on " + afterRetry + " after retry");
                   }
                 } else if (fallback) {
-                  await page.goto(fallback, { waitUntil: "domcontentloaded", timeout: 90000 });
+                  await page.goto(fallback, { waitUntil: "domcontentloaded", timeout: 30000 });
                   await new Promise(r => setTimeout(r, 2000));
-                  for (let _ugSpa = 0; _ugSpa < 6; _ugSpa++) {
+                  for (let _ugSpa = 0; _ugSpa < 3; _ugSpa++) {
                     const isLoading = await page.evaluate(() => {
                       const body = document.body.innerText.toLowerCase();
                       return body.includes("loading your profile") || body.includes("loading...") || !!document.querySelector("[class*='spinner'], .animate-spin");
@@ -2553,9 +2553,9 @@ function buildCompositeScript(
                 }
               } else if (fallback) {
                 // Strategy 2: direct navigation
-                await page.goto(fallback, { waitUntil: "domcontentloaded", timeout: 90000 });
+                await page.goto(fallback, { waitUntil: "domcontentloaded", timeout: 30000 });
                 await new Promise(r => setTimeout(r, 2000));
-                for (let _ugSpa2 = 0; _ugSpa2 < 6; _ugSpa2++) {
+                for (let _ugSpa2 = 0; _ugSpa2 < 3; _ugSpa2++) {
                   const isLoading = await page.evaluate(() => {
                     const body = document.body.innerText.toLowerCase();
                     return body.includes("loading your profile") || body.includes("loading...") || !!document.querySelector("[class*='spinner'], .animate-spin");
@@ -2585,8 +2585,8 @@ function buildCompositeScript(
             const searchText = ${searchText};
             // Retry with backoff for SPA pages still loading
             let rowInfo = { found: false };
-            for (let _frRetry = 0; _frRetry < 6; _frRetry++) {
-              await new Promise(r => setTimeout(r, _frRetry === 0 ? 1500 : 3000)); // let table render
+            for (let _frRetry = 0; _frRetry < 4; _frRetry++) {
+              await new Promise(r => setTimeout(r, _frRetry === 0 ? 1000 : 2000)); // let table render
               rowInfo = await page.evaluate((txt) => {
                 // Strategy 1: find in <tr> elements
                 const rows = document.querySelectorAll("tr");
@@ -2628,8 +2628,8 @@ function buildCompositeScript(
                 return { found: false };
               }, searchText);
               if (rowInfo.found) break;
-              // Always retry at least 3 times to handle SPA transitions
-              if (_frRetry < 3) continue;
+              // Always retry at least 2 times to handle SPA transitions
+              if (_frRetry < 2) continue;
               // After minimum retries, check if page is still loading
               const isLoading = await page.evaluate(() => {
                 const body = document.body.innerText.toLowerCase();
@@ -2661,8 +2661,8 @@ function buildCompositeScript(
             const btnTxt = ${buttonText};
             let clicked = { clicked: false, rowNotFound: true };
             // Retry with backoff for SPA pages still loading
-            for (let _cirRetry = 0; _cirRetry < 5; _cirRetry++) {
-              if (_cirRetry > 0) await new Promise(r => setTimeout(r, 3000));
+            for (let _cirRetry = 0; _cirRetry < 4; _cirRetry++) {
+              if (_cirRetry > 0) await new Promise(r => setTimeout(r, 2000));
               clicked = await page.evaluate((rowSearch, btnSearch) => {
                 const allContainers = [...document.querySelectorAll("tr, [class*='row'], [class*='item'], [class*='order'], [class*='card'], [role='row']")];
                 for (const container of allContainers) {
@@ -2699,8 +2699,8 @@ function buildCompositeScript(
                 const body = document.body.innerText.toLowerCase();
                 return body.includes("loading") || body.includes("skeleton") || !!document.querySelector("[class*='spinner'], [class*='loading'], [class*='skeleton'], .animate-spin, .animate-pulse");
               }).catch(() => false);
-              // Always retry at least 3 times to handle SPA transitions
-              if (_cirRetry < 3) continue;
+              // Always retry at least 2 times to handle SPA transitions
+              if (_cirRetry < 2) continue;
               if (!isLoading) break;
             }
             if (clicked.clicked) {
@@ -3282,10 +3282,10 @@ function buildCompositeScript(
       if (_startNavUrl && !_startNavUrl.startsWith("http://") && !_startNavUrl.startsWith("https://")) _startNavUrl = "https://" + _startNavUrl;
       for (let _navRetry = 0; _navRetry < 2; _navRetry++) {
         try {
-          await page.goto(_startNavUrl, { waitUntil: "domcontentloaded", timeout: 90000 });
-          await new Promise(r => setTimeout(r, 1500)); // brief settle
+          await page.goto(_startNavUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+          await new Promise(r => setTimeout(r, 1000)); // brief settle
           // Wait for SPA content to settle
-          for (let _startSpa = 0; _startSpa < 5; _startSpa++) {
+          for (let _startSpa = 0; _startSpa < 3; _startSpa++) {
             const isLoading = await page.evaluate(() => {
               const body = document.body.innerText.toLowerCase();
               return body.includes("loading your profile") || body.includes("loading...") || !!document.querySelector("[class*='spinner'], .animate-spin");
@@ -3451,7 +3451,7 @@ function buildActionScript(
         // Reconnect: navigate to last known URL first
         await page.goto(${JSON.stringify(currentUrl)}, {
           waitUntil: "domcontentloaded",
-          timeout: 90000,
+          timeout: 30000,
         }).catch(() => {});
     `;
   };
@@ -3460,7 +3460,7 @@ function buildActionScript(
     case "navigate":
       return `export default async function ({ page }) {
         const targetUrl = ${JSON.stringify(params.url || "about:blank")};
-        await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 90000 });
+        await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
         const title = await page.title();
         const finalUrl = page.url();
         return {
