@@ -69,6 +69,9 @@ serve(async (req) => {
     let model = agent?.model || "gemini-2.0-flash";
     // Strip provider prefix if present (e.g., "google/gemini-3-flash-preview" -> "gemini-2.0-flash")
     if (model.startsWith("google/")) model = "gemini-2.0-flash";
+    // Normalize known model aliases
+    const validModels = ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.5-flash-preview-05-20"];
+    if (!validModels.some(m => model.includes(m))) model = "gemini-2.0-flash";
 
     // Get available tools for this agent
     let tools: ToolDef[] = [];
@@ -97,21 +100,84 @@ serve(async (req) => {
     ];
 
     for (const m of dbMessages || []) {
+      // Skip malformed messages that would cause Gemini 400 errors
+      if (!m.role) continue;
+
+      // Tool result messages
+      if (m.role === "tool") {
+        if (!m.tool_call_id) continue; // tool messages require tool_call_id
+        llmMessages.push({
+          role: "tool",
+          content: m.content || "No output",
+          tool_call_id: m.tool_call_id,
+        });
+        continue;
+      }
+
+      // Assistant messages
+      if (m.role === "assistant") {
+        const msg: any = { role: "assistant" };
+        // Gemini requires content to be a non-empty string or omitted when tool_calls present
+        if (m.tool_calls && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
+          msg.tool_calls = (m.tool_calls as any[]).map((tc: any) => ({
+            id: tc.id || `call_${Math.random().toString(36).slice(2, 10)}`,
+            type: "function",
+            function: {
+              name: tc.function?.name || tc.name || "unknown",
+              arguments: typeof tc.function?.arguments === "string"
+                ? tc.function.arguments
+                : JSON.stringify(tc.function?.arguments || tc.arguments || {}),
+            },
+          }));
+          // Gemini needs content even with tool_calls, use empty string
+          msg.content = m.content || "";
+        } else {
+          msg.content = m.content || "";
+          // Skip empty assistant messages with no tool calls
+          if (!msg.content) continue;
+        }
+        llmMessages.push(msg);
+        continue;
+      }
+
+      // User messages
+      if (m.role === "user") {
+        llmMessages.push({ role: "user", content: m.content || "" });
+        continue;
+      }
+
+      // Other roles: pass through with safe content
       const msg: any = { role: m.role, content: m.content || "" };
       if (m.tool_calls) msg.tool_calls = m.tool_calls;
       if (m.tool_call_id) msg.tool_call_id = m.tool_call_id;
       llmMessages.push(msg);
     }
 
+    // Validate: ensure conversation ends with a user or tool message, not assistant
+    // Gemini requires the last message to be from user or tool for generation
+    const lastMsg = llmMessages[llmMessages.length - 1];
+    if (lastMsg && lastMsg.role === "assistant" && !lastMsg.tool_calls) {
+      // This shouldn't happen normally, but guard against it
+      llmMessages.push({ role: "user", content: "(continue)" });
+    }
+
     // Build tool definitions for LLM
-    const llmTools = tools.map((t) => ({
-      type: "function" as const,
-      function: {
-        name: t.name,
-        description: t.description,
-        parameters: t.input_schema || { type: "object", properties: {} },
-      },
-    }));
+    const llmTools = tools.map((t) => {
+      // Ensure input_schema is a valid JSON Schema object
+      let params = t.input_schema || { type: "object", properties: {} };
+      // Gemini requires "type": "object" at the top level
+      if (typeof params === "object" && !params.type) {
+        params = { type: "object", ...params };
+      }
+      return {
+        type: "function" as const,
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: params,
+        },
+      };
+    });
 
     // Call LLM with streaming
     const llmBody: any = {
@@ -122,6 +188,15 @@ serve(async (req) => {
     if (llmTools.length > 0) {
       llmBody.tools = llmTools;
     }
+
+    // Debug: log the request body summary (remove content for brevity)
+    console.log("LLM request:", JSON.stringify({
+      model: llmBody.model,
+      message_count: llmBody.messages.length,
+      message_roles: llmBody.messages.map((m: any) => m.role),
+      tool_count: llmBody.tools?.length || 0,
+      last_message_role: llmBody.messages[llmBody.messages.length - 1]?.role,
+    }));
 
     const llmResponse = await fetchWithRetry(
       "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
@@ -150,7 +225,20 @@ serve(async (req) => {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
-      throw new Error(`AI service error (HTTP ${llmResponse.status}). Please try again.`);
+      // Parse Gemini error for better messaging
+      let detailedError = `AI service error (HTTP ${llmResponse.status})`;
+      try {
+        const errJson = JSON.parse(errText);
+        const errMsg = errJson?.[0]?.error?.message || errJson?.error?.message;
+        if (errMsg) {
+          detailedError = errMsg;
+          // If API key is invalid, give a clear message
+          if (errMsg.includes("API key not valid")) {
+            detailedError = "Gemini API key is invalid. Please update GEMINI_API_KEY in Supabase secrets.";
+          }
+        }
+      } catch {}
+      throw new Error(detailedError);
     }
 
     // Process stream: collect tool calls and stream text

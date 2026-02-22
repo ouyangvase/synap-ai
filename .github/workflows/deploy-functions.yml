@@ -1,0 +1,42 @@
+name: Deploy Supabase Functions
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'supabase/functions/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      PROJECT_REF: ffbwyzskfpfnzpgypabr
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Deploy chat function
+        run: supabase functions deploy chat --project-ref $PROJECT_REF --no-verify-jwt
+
+      - name: Deploy execute-tool function
+        run: supabase functions deploy execute-tool --project-ref $PROJECT_REF --no-verify-jwt
+
+      - name: Deploy browser-proxy function
+        run: supabase functions deploy browser-proxy --project-ref $PROJECT_REF --no-verify-jwt
+
+      - name: Deploy generate-image function
+        run: supabase functions deploy generate-image --project-ref $PROJECT_REF --no-verify-jwt
+
+      - name: Deploy jobs-run function
+        run: supabase functions deploy jobs-run --project-ref $PROJECT_REF --no-verify-jwt
+
+      - name: Deploy jobs-resume function
+        run: supabase functions deploy jobs-resume --project-ref $PROJECT_REF --no-verify-jwt
+
+      - name: Deploy daily-cron function
+        run: supabase functions deploy daily-cron --project-ref $PROJECT_REF --no-verify-jwt
