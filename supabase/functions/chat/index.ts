@@ -22,6 +22,125 @@ interface ToolEndpoint {
   headers: Record<string, string>;
 }
 
+// ── Helpers ──────────────────────────────────────────
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchWithRetry(url: string, options: RequestInit, maxRetries = 3): Promise<Response> {
+  for (let i = 0; i <= maxRetries; i++) {
+    try {
+      const resp = await fetch(url, options);
+      if (resp.status === 429 && i < maxRetries) {
+        await delay(Math.pow(2, i) * 1000 + Math.random() * 1000);
+        continue;
+      }
+      return resp;
+    } catch (e) {
+      if (i === maxRetries) throw e;
+      await delay(Math.pow(2, i) * 1000);
+    }
+  }
+  throw new Error("Max retries exceeded");
+}
+
+/**
+ * Sanitize a single tool_call so it is valid for Gemini's OpenAI-compat API.
+ * Returns null if the call is unsalvageable (empty function name).
+ */
+function sanitizeToolCall(tc: any): { id: string; type: "function"; function: { name: string; arguments: string } } | null {
+  const name = tc?.function?.name || tc?.name || "";
+  if (!name || name === "unknown") return null; // DROP calls with empty/unknown name
+
+  const id = tc?.id || tc?.function?.id || `call_${Math.random().toString(36).slice(2, 10)}`;
+  let args: string;
+  if (typeof tc?.function?.arguments === "string") {
+    args = tc.function.arguments;
+  } else {
+    args = JSON.stringify(tc?.function?.arguments || tc?.arguments || {});
+  }
+
+  return { id, type: "function", function: { name, arguments: args } };
+}
+
+/**
+ * Build a clean LLM message array from DB rows.
+ * Drops any tool_call whose function.name is empty (prevents Gemini 400).
+ * Also drops orphaned tool results with no matching assistant tool_call.
+ */
+function buildLlmMessages(systemPrompt: string, dbMessages: any[]): any[] {
+  const msgs: any[] = [{ role: "system", content: systemPrompt }];
+  const validToolCallIds = new Set<string>();
+
+  for (const m of dbMessages || []) {
+    if (!m.role) continue;
+
+    // ── assistant ──
+    if (m.role === "assistant") {
+      const msg: any = { role: "assistant" };
+      if (m.tool_calls && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
+        const sanitized = (m.tool_calls as any[]).map(sanitizeToolCall).filter(Boolean) as any[];
+        if (sanitized.length > 0) {
+          msg.tool_calls = sanitized;
+          msg.content = m.content || "";
+          sanitized.forEach((tc: any) => validToolCallIds.add(tc.id));
+        } else {
+          // All tool calls had empty names — convert to plain text
+          msg.content = m.content || "(tool call omitted)";
+        }
+      } else {
+        msg.content = m.content || "";
+        if (!msg.content) continue;
+      }
+      msgs.push(msg);
+      continue;
+    }
+
+    // ── tool result ──
+    if (m.role === "tool") {
+      if (!m.tool_call_id) continue;
+      if (!validToolCallIds.has(m.tool_call_id)) continue;
+      msgs.push({
+        role: "tool",
+        content: (m.content || "No output").substring(0, 15000),
+        tool_call_id: m.tool_call_id,
+      });
+      continue;
+    }
+
+    // ── user ──
+    if (m.role === "user") {
+      msgs.push({ role: "user", content: m.content || "" });
+      continue;
+    }
+  }
+
+  // Gemini requires last message to be user or tool
+  const last = msgs[msgs.length - 1];
+  if (last && last.role === "assistant" && !last.tool_calls) {
+    msgs.push({ role: "user", content: "(continue)" });
+  }
+
+  return msgs;
+}
+
+/**
+ * Deduplicate consecutive identical user messages.
+ */
+function deduplicateUserMessages(msgs: any[]): any[] {
+  const result: any[] = [];
+  for (let i = 0; i < msgs.length; i++) {
+    if (i > 0 && msgs[i].role === "user" && msgs[i - 1]?.role === "user" && msgs[i].content === msgs[i - 1].content) {
+      continue;
+    }
+    result.push(msgs[i]);
+  }
+  return result;
+}
+
+// ── Main serve ──────────────────────────────────────
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
@@ -31,7 +150,6 @@ serve(async (req) => {
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const geminiApiKey = Deno.env.get("GEMINI_API_KEY")!;
 
-    // Auth: create client with user's token
     const supabaseUser = createClient(supabaseUrl, Deno.env.get("SUPABASE_ANON_KEY")!, {
       global: { headers: { Authorization: authHeader || "" } },
     });
@@ -39,18 +157,15 @@ serve(async (req) => {
     const { data: { user }, error: authError } = await supabaseUser.auth.getUser();
     if (authError || !user) {
       return new Response(JSON.stringify({ error: "Unauthorized" }), {
-        status: 401,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
     const { conversation_id } = await req.json();
     if (!conversation_id) throw new Error("conversation_id required");
 
-    // Use service role for DB operations
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-    // Verify conversation ownership
     const { data: conversation } = await supabase
       .from("conversations")
       .select("*, agents(*)")
@@ -59,153 +174,57 @@ serve(async (req) => {
 
     if (!conversation || conversation.user_id !== user.id) {
       return new Response(JSON.stringify({ error: "Not found" }), {
-        status: 404,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+        status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
     const agent = conversation.agents;
     const systemPrompt = agent?.system_prompt || "You are a helpful AI assistant.";
     let model = agent?.model || "gemini-2.0-flash";
-    // Strip provider prefix if present (e.g., "google/gemini-3-flash-preview" -> "gemini-2.0-flash")
     if (model.startsWith("google/")) model = "gemini-2.0-flash";
-    // Normalize known model aliases
-    const validModels = ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.5-flash-preview-05-20"];
+    const validModels = ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.5-flash-preview"];
     if (!validModels.some(m => model.includes(m))) model = "gemini-2.0-flash";
 
-    // Get available tools for this agent
     let tools: ToolDef[] = [];
     if (agent) {
       const { data: agentTools } = await supabase
         .from("agent_tools")
         .select("tool_id, tools(*)")
         .eq("agent_id", agent.id);
-
       if (agentTools) {
-        tools = agentTools
-          .map((at: any) => at.tools)
-          .filter((t: any) => t && t.is_active);
+        tools = agentTools.map((at: any) => at.tools).filter((t: any) => t && t.is_active);
       }
     }
 
-    // Load conversation history
     const { data: dbMessages } = await supabase
       .from("messages")
       .select("role, content, tool_call_id, tool_calls")
       .eq("conversation_id", conversation_id)
       .order("created_at", { ascending: true });
 
-    const llmMessages: any[] = [
-      { role: "system", content: systemPrompt },
-    ];
+    let llmMessages = buildLlmMessages(systemPrompt, dbMessages || []);
+    llmMessages = deduplicateUserMessages(llmMessages);
 
-    for (const m of dbMessages || []) {
-      // Skip malformed messages that would cause Gemini 400 errors
-      if (!m.role) continue;
-
-      // Tool result messages
-      if (m.role === "tool") {
-        if (!m.tool_call_id) continue; // tool messages require tool_call_id
-        llmMessages.push({
-          role: "tool",
-          content: m.content || "No output",
-          tool_call_id: m.tool_call_id,
-        });
-        continue;
-      }
-
-      // Assistant messages
-      if (m.role === "assistant") {
-        const msg: any = { role: "assistant" };
-        // Gemini requires content to be a non-empty string or omitted when tool_calls present
-        if (m.tool_calls && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
-          msg.tool_calls = (m.tool_calls as any[]).map((tc: any) => ({
-            id: tc.id || `call_${Math.random().toString(36).slice(2, 10)}`,
-            type: "function",
-            function: {
-              name: tc.function?.name || tc.name || "unknown",
-              arguments: typeof tc.function?.arguments === "string"
-                ? tc.function.arguments
-                : JSON.stringify(tc.function?.arguments || tc.arguments || {}),
-            },
-          }));
-          // Gemini needs content even with tool_calls, use empty string
-          msg.content = m.content || "";
-        } else {
-          msg.content = m.content || "";
-          // Skip empty assistant messages with no tool calls
-          if (!msg.content) continue;
-        }
-        llmMessages.push(msg);
-        continue;
-      }
-
-      // User messages
-      if (m.role === "user") {
-        llmMessages.push({ role: "user", content: m.content || "" });
-        continue;
-      }
-
-      // Other roles: pass through with safe content
-      const msg: any = { role: m.role, content: m.content || "" };
-      if (m.tool_calls) msg.tool_calls = m.tool_calls;
-      if (m.tool_call_id) msg.tool_call_id = m.tool_call_id;
-      llmMessages.push(msg);
-    }
-
-    // Validate: ensure conversation ends with a user or tool message, not assistant
-    // Gemini requires the last message to be from user or tool for generation
-    const lastMsg = llmMessages[llmMessages.length - 1];
-    if (lastMsg && lastMsg.role === "assistant" && !lastMsg.tool_calls) {
-      // This shouldn't happen normally, but guard against it
-      llmMessages.push({ role: "user", content: "(continue)" });
-    }
-
-    // Build tool definitions for LLM
     const llmTools = tools.map((t) => {
-      // Ensure input_schema is a valid JSON Schema object
       let params = t.input_schema || { type: "object", properties: {} };
-      // Gemini requires "type": "object" at the top level
-      if (typeof params === "object" && !params.type) {
-        params = { type: "object", ...params };
-      }
-      return {
-        type: "function" as const,
-        function: {
-          name: t.name,
-          description: t.description,
-          parameters: params,
-        },
-      };
+      if (typeof params === "object" && !params.type) params = { type: "object", ...params };
+      return { type: "function" as const, function: { name: t.name, description: t.description, parameters: params } };
     });
 
-    // Call LLM with streaming
-    const llmBody: any = {
-      model,
-      messages: llmMessages,
-      stream: true,
-    };
-    if (llmTools.length > 0) {
-      llmBody.tools = llmTools;
-    }
+    const llmBody: any = { model, messages: llmMessages, stream: true };
+    if (llmTools.length > 0) llmBody.tools = llmTools;
 
-    // Debug: log the request body summary (remove content for brevity)
     console.log("LLM request:", JSON.stringify({
-      model: llmBody.model,
-      message_count: llmBody.messages.length,
-      message_roles: llmBody.messages.map((m: any) => m.role),
-      tool_count: llmBody.tools?.length || 0,
-      last_message_role: llmBody.messages[llmBody.messages.length - 1]?.role,
+      model, msg_count: llmMessages.length,
+      roles: llmMessages.map((m: any) => m.role),
+      tool_count: llmTools.length,
     }));
 
     const llmResponse = await fetchWithRetry(
       "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
       {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${geminiApiKey}`,
-          "Content-Type": "application/json",
-        },
+        headers: { Authorization: `Bearer ${geminiApiKey}`, "Content-Type": "application/json" },
         body: JSON.stringify(llmBody),
       }
     );
@@ -215,293 +234,140 @@ serve(async (req) => {
       console.error("LLM error:", llmResponse.status, errText);
       if (llmResponse.status === 429) {
         return new Response(JSON.stringify({ error: "Rate limited, try again later." }), {
-          status: 429,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
+          status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
-      if (llmResponse.status === 402) {
-        return new Response(JSON.stringify({ error: "AI credits exhausted." }), {
-          status: 402,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-      // Parse Gemini error for better messaging
       let detailedError = `AI service error (HTTP ${llmResponse.status})`;
       try {
         const errJson = JSON.parse(errText);
         const errMsg = errJson?.[0]?.error?.message || errJson?.error?.message;
         if (errMsg) {
           detailedError = errMsg;
-          // If API key is invalid, give a clear message
-          if (errMsg.includes("API key not valid")) {
-            detailedError = "Gemini API key is invalid. Please update GEMINI_API_KEY in Supabase secrets.";
-          }
+          if (errMsg.includes("API key not valid")) detailedError = "Gemini API key is invalid.";
         }
       } catch {}
       throw new Error(detailedError);
     }
 
-    // Process stream: collect tool calls and stream text
+    // ── Stream response ──
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       async start(controller) {
         try {
-          const reader = llmResponse.body!.getReader();
-          const decoder = new TextDecoder();
-          let buffer = "";
-          let fullContent = "";
-          let toolCallsAccumulator: Record<number, { id: string; function: { name: string; arguments: string } }> = {};
-          let finishReason = "";
+          const { fullContent, toolCallsList } = await processStream(llmResponse, controller, encoder);
 
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-
-            let nlIdx: number;
-            while ((nlIdx = buffer.indexOf("\n")) !== -1) {
-              let line = buffer.slice(0, nlIdx);
-              buffer = buffer.slice(nlIdx + 1);
-              if (line.endsWith("\r")) line = line.slice(0, -1);
-              if (!line.startsWith("data: ") || line.trim() === "") continue;
-              const jsonStr = line.slice(6).trim();
-              if (jsonStr === "[DONE]") continue;
-
-              try {
-                const parsed = JSON.parse(jsonStr);
-                const choice = parsed.choices?.[0];
-                if (!choice) continue;
-
-                if (choice.finish_reason) finishReason = choice.finish_reason;
-
-                const delta = choice.delta;
-                if (!delta) continue;
-
-                // Text content
-                if (delta.content) {
-                  fullContent += delta.content;
-                  controller.enqueue(encoder.encode(`data: ${JSON.stringify(parsed)}\n\n`));
-                }
-
-                // Tool calls
-                if (delta.tool_calls) {
-                  for (const tc of delta.tool_calls) {
-                    const idx = tc.index ?? 0;
-                    if (!toolCallsAccumulator[idx]) {
-                      toolCallsAccumulator[idx] = { id: tc.id || "", function: { name: "", arguments: "" } };
-                    }
-                    if (tc.id) toolCallsAccumulator[idx].id = tc.id;
-                    if (tc.function?.name) toolCallsAccumulator[idx].function.name += tc.function.name;
-                    if (tc.function?.arguments) toolCallsAccumulator[idx].function.arguments += tc.function.arguments;
-                  }
-                }
-              } catch {
-                // partial JSON, ignore
-              }
-            }
-          }
-
-          // Save assistant message
-          const toolCallsList = Object.values(toolCallsAccumulator);
-          const assistantMsg: any = {
-            conversation_id,
-            user_id: user.id,
-            role: "assistant",
+          await supabase.from("messages").insert({
+            conversation_id, user_id: user.id, role: "assistant",
             content: fullContent || null,
             tool_calls: toolCallsList.length > 0 ? toolCallsList : null,
-          };
-          await supabase.from("messages").insert(assistantMsg);
+          });
 
-          // Handle tool calls - AGENTIC LOOP: keep calling tools until AI gives a text response
+          // ── Agentic loop ──
           if (toolCallsList.length > 0) {
             let loopMessages = [...llmMessages];
             let currentToolCalls = toolCallsList;
             let currentContent = fullContent;
-            const MAX_AGENT_LOOPS = 16; // autonomous agent needs more steps for complex tasks (initial + failure analysis + correction cycles)
+            const MAX_LOOPS = 16;
 
-            for (let agentLoop = 0; agentLoop < MAX_AGENT_LOOPS; agentLoop++) {
-              const toolResultMessages: any[] = [];
-              let hasApprovalPending = false;
+            for (let loop = 0; loop < MAX_LOOPS; loop++) {
+              const toolResultMsgs: any[] = [];
+              let approvalPending = false;
 
               for (const tc of currentToolCalls) {
+                if (!tc.function.name || tc.function.name === "unknown") {
+                  console.warn("Skipping tool call with empty name:", JSON.stringify(tc));
+                  continue;
+                }
+
                 const tool = tools.find((t) => t.name === tc.function.name);
-                if (!tool) continue;
+                if (!tool) { console.warn("Tool not found:", tc.function.name); continue; }
 
                 let parsedArgs: Record<string, unknown> = {};
                 try { parsedArgs = JSON.parse(tc.function.arguments); } catch {}
 
-                // Create tool run
                 const { data: toolRun } = await supabase
                   .from("tool_runs")
                   .insert({
-                    conversation_id,
-                    user_id: user.id,
-                    tool_id: tool.id,
+                    conversation_id, user_id: user.id, tool_id: tool.id,
                     tool_call_id: tc.id,
                     status: tool.requires_approval ? "pending" : "running",
                     input: parsedArgs,
                     started_at: tool.requires_approval ? null : new Date().toISOString(),
                   })
-                  .select()
-                  .single();
+                  .select().single();
 
                 if (tool.requires_approval && toolRun) {
-                  await supabase.from("tool_approvals").insert({
-                    tool_run_id: toolRun.id,
-                    status: "pending",
-                  });
+                  await supabase.from("tool_approvals").insert({ tool_run_id: toolRun.id, status: "pending" });
                   controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "approval_required", tool_run_id: toolRun.id, tool_name: tool.name })}\n\n`));
-                  hasApprovalPending = true;
+                  approvalPending = true;
                 } else if (toolRun) {
                   controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "tool_call", tool_run_id: toolRun.id, tool_name: tool.name })}\n\n`));
                   await executeToolRun(supabase, toolRun.id, tool, parsedArgs, user.id, conversation_id);
                   controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "tool_result", tool_run_id: toolRun.id })}\n\n`));
 
                   const { data: completedRun } = await supabase
-                    .from("tool_runs")
-                    .select("output, status, tool_call_id")
-                    .eq("id", toolRun.id)
-                    .single();
+                    .from("tool_runs").select("output, status, tool_call_id").eq("id", toolRun.id).single();
 
                   if (completedRun) {
-                    const resultContent = completedRun.output?.markdown_content || JSON.stringify(completedRun.output || {});
-                    toolResultMessages.push({
+                    const rc = completedRun.output?.markdown_content || JSON.stringify(completedRun.output || {});
+                    toolResultMsgs.push({
                       role: "tool",
-                      content: typeof resultContent === 'string' ? resultContent.substring(0, 10000) : JSON.stringify(resultContent).substring(0, 10000),
+                      content: (typeof rc === "string" ? rc : JSON.stringify(rc)).substring(0, 15000),
                       tool_call_id: completedRun.tool_call_id,
                     });
                   }
                 }
               }
 
-              // If approval is pending, stop the loop
-              if (hasApprovalPending) break;
+              if (approvalPending || toolResultMsgs.length === 0) break;
 
-              // If no tool results, stop
-              if (toolResultMessages.length === 0) break;
+              const sanitizedCalls = currentToolCalls.map(sanitizeToolCall).filter(Boolean) as any[];
+              if (sanitizedCalls.length === 0) break;
 
-              // Build follow-up messages for next LLM call
               loopMessages = [
                 ...loopMessages,
-                {
-                  role: "assistant",
-                  content: currentContent || null,
-                  tool_calls: currentToolCalls.map((tc) => ({
-                    id: tc.id, type: "function",
-                    function: { name: tc.function.name, arguments: tc.function.arguments }
-                  }))
-                },
-                ...toolResultMessages,
+                { role: "assistant", content: currentContent || "", tool_calls: sanitizedCalls },
+                ...toolResultMsgs,
               ];
 
-              // NOTE: tool result messages are already saved to DB by executeToolRun.
-              // Do NOT insert them again here to avoid duplicates.
-
-              const followUpBody: any = {
-                model,
-                messages: loopMessages,
-                stream: true,
-              };
+              const followUpBody: any = { model, messages: loopMessages, stream: true };
               if (llmTools.length > 0) followUpBody.tools = llmTools;
 
               const followUpResp = await fetchWithRetry(
                 "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
                 {
                   method: "POST",
-                  headers: {
-                    Authorization: `Bearer ${geminiApiKey}`,
-                    "Content-Type": "application/json",
-                  },
+                  headers: { Authorization: `Bearer ${geminiApiKey}`, "Content-Type": "application/json" },
                   body: JSON.stringify(followUpBody),
                 }
               );
 
               if (!followUpResp.ok) {
                 const errStatus = followUpResp.status;
-                console.error("Follow-up LLM error:", errStatus);
-                // Don't break silently — surface error info
-                if (errStatus === 429) {
-                  controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "\n\n*Rate limited by AI provider — pausing. Please wait and retry.*" } }] })}\n\n`));
-                } else if (errStatus >= 500) {
-                  controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "\n\n*AI service temporarily unavailable. Please retry.*" } }] })}\n\n`));
-                }
+                console.error("Follow-up error:", errStatus);
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: `\n\n*AI error (${errStatus}). Please retry.*` } }] })}\n\n`));
                 break;
               }
 
-              // Parse follow-up response
-              const followReader = followUpResp.body!.getReader();
-              const followDecoder = new TextDecoder();
-              let followBuffer = "";
-              let followContent = "";
-              let followToolCalls: Record<number, { id: string; function: { name: string; arguments: string } }> = {};
-              let followFinish = "";
+              const followUp = await processStream(followUpResp, controller, encoder);
 
-              while (true) {
-                const { done: fDone, value: fValue } = await followReader.read();
-                if (fDone) break;
-                followBuffer += followDecoder.decode(fValue, { stream: true });
-
-                let fIdx: number;
-                while ((fIdx = followBuffer.indexOf("\n")) !== -1) {
-                  let fLine = followBuffer.slice(0, fIdx);
-                  followBuffer = followBuffer.slice(fIdx + 1);
-                  if (fLine.endsWith("\r")) fLine = fLine.slice(0, -1);
-                  if (!fLine.startsWith("data: ") || fLine.trim() === "") continue;
-                  const fJson = fLine.slice(6).trim();
-                  if (fJson === "[DONE]") continue;
-
-                  try {
-                    const fParsed = JSON.parse(fJson);
-                    const fChoice = fParsed.choices?.[0];
-                    if (!fChoice) continue;
-                    if (fChoice.finish_reason) followFinish = fChoice.finish_reason;
-                    const fDelta = fChoice.delta;
-                    if (!fDelta) continue;
-
-                    if (fDelta.content) {
-                      followContent += fDelta.content;
-                      controller.enqueue(encoder.encode(`data: ${JSON.stringify(fParsed)}\n\n`));
-                    }
-                    if (fDelta.tool_calls) {
-                      for (const tc of fDelta.tool_calls) {
-                        const idx = tc.index ?? 0;
-                        if (!followToolCalls[idx]) {
-                          followToolCalls[idx] = { id: tc.id || "", function: { name: "", arguments: "" } };
-                        }
-                        if (tc.id) followToolCalls[idx].id = tc.id;
-                        if (tc.function?.name) followToolCalls[idx].function.name += tc.function.name;
-                        if (tc.function?.arguments) followToolCalls[idx].function.arguments += tc.function.arguments;
-                      }
-                    }
-                  } catch {}
-                }
-              }
-
-              // Save follow-up assistant message
-              const followToolCallsList = Object.values(followToolCalls);
-              if (followContent || followToolCallsList.length > 0) {
+              if (followUp.fullContent || followUp.toolCallsList.length > 0) {
                 await supabase.from("messages").insert({
-                  conversation_id,
-                  user_id: user.id,
-                  role: "assistant",
-                  content: followContent || null,
-                  tool_calls: followToolCallsList.length > 0 ? followToolCallsList : null,
+                  conversation_id, user_id: user.id, role: "assistant",
+                  content: followUp.fullContent || null,
+                  tool_calls: followUp.toolCallsList.length > 0 ? followUp.toolCallsList : null,
                 });
               }
 
-              // If the follow-up also has tool calls, continue the loop
-              if (followToolCallsList.length > 0) {
-                currentToolCalls = followToolCallsList;
-                currentContent = followContent;
-                continue; // next iteration of agent loop
+              if (followUp.toolCallsList.length > 0) {
+                currentToolCalls = followUp.toolCallsList;
+                currentContent = followUp.fullContent;
+                continue;
               }
-
-              // Otherwise, we're done - AI gave a text response
               break;
             }
           }
 
-          // Update conversation title if it's the first exchange
           if ((dbMessages?.length || 0) <= 1 && fullContent) {
             const title = fullContent.slice(0, 60).replace(/\n/g, " ");
             await supabase.from("conversations").update({ title }).eq("id", conversation_id);
@@ -522,75 +388,119 @@ serve(async (req) => {
   } catch (e) {
     console.error("chat error:", e);
     return new Response(JSON.stringify({ error: e instanceof Error ? e.message : "Unknown error" }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
 });
 
+// ── Reusable stream parser ──
+
+async function processStream(
+  response: Response,
+  controller: ReadableStreamDefaultController,
+  encoder: TextEncoder
+): Promise<{ fullContent: string; toolCallsList: { id: string; function: { name: string; arguments: string } }[] }> {
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let fullContent = "";
+  const acc: Record<number, { id: string; function: { name: string; arguments: string } }> = {};
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let nlIdx: number;
+    while ((nlIdx = buffer.indexOf("\n")) !== -1) {
+      let line = buffer.slice(0, nlIdx);
+      buffer = buffer.slice(nlIdx + 1);
+      if (line.endsWith("\r")) line = line.slice(0, -1);
+      if (!line.startsWith("data: ") || line.trim() === "") continue;
+      const jsonStr = line.slice(6).trim();
+      if (jsonStr === "[DONE]") continue;
+
+      try {
+        const parsed = JSON.parse(jsonStr);
+        const choice = parsed.choices?.[0];
+        if (!choice) continue;
+        const delta = choice.delta;
+        if (!delta) continue;
+
+        if (delta.content) {
+          fullContent += delta.content;
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(parsed)}\n\n`));
+        }
+
+        if (delta.tool_calls) {
+          for (const tc of delta.tool_calls) {
+            const idx = tc.index ?? 0;
+            if (!acc[idx]) acc[idx] = { id: tc.id || "", function: { name: "", arguments: "" } };
+            if (tc.id) acc[idx].id = tc.id;
+            if (tc.function?.name) acc[idx].function.name += tc.function.name;
+            if (tc.function?.arguments) acc[idx].function.arguments += tc.function.arguments;
+          }
+        }
+      } catch {}
+    }
+  }
+
+  const toolCallsList = Object.values(acc).filter(tc => tc.function.name && tc.function.name !== "unknown");
+  for (const tc of toolCallsList) {
+    if (!tc.id) tc.id = `call_${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  return { fullContent, toolCallsList };
+}
+
+// ── Tool execution ──
+
 async function executeToolRun(
-  supabase: any,
-  toolRunId: string,
-  tool: ToolDef,
-  input: Record<string, unknown>,
-  userId: string,
-  conversationId: string
+  supabase: any, toolRunId: string, tool: ToolDef,
+  input: Record<string, unknown>, userId: string, conversationId: string
 ) {
   try {
-    // Get endpoint
     const { data: endpoint } = await supabase
-      .from("tool_endpoints")
-      .select("*")
-      .eq("tool_id", tool.id)
-      .single();
+      .from("tool_endpoints").select("*").eq("tool_id", tool.id).single();
 
     if (!endpoint) {
       await supabase.from("tool_runs").update({
-        status: "failed",
-        error: "No endpoint configured",
-        completed_at: new Date().toISOString(),
+        status: "failed", error: "No endpoint configured", completed_at: new Date().toISOString(),
       }).eq("id", toolRunId);
       return;
     }
 
     const ep = endpoint as ToolEndpoint;
-
-    // Resolve N8N_WEBHOOK_BASE_URL placeholder in endpoint URL
     let resolvedUrl = ep.endpoint_url;
     const n8nBase = Deno.env.get("N8N_WEBHOOK_BASE_URL");
-    if (n8nBase && resolvedUrl.includes("{N8N_WEBHOOK_BASE_URL}")) {
+    if (n8nBase && resolvedUrl.includes("{N8N_WEBHOOK_BASE_URL}"))
       resolvedUrl = resolvedUrl.replace("{N8N_WEBHOOK_BASE_URL}", n8nBase.replace(/\/$/, ""));
-    }
-    // Resolve SUPABASE_URL placeholder in endpoint URL
     const supabaseUrlEnv = Deno.env.get("SUPABASE_URL");
-    if (supabaseUrlEnv && resolvedUrl.includes("{SUPABASE_URL}")) {
+    if (supabaseUrlEnv && resolvedUrl.includes("{SUPABASE_URL}"))
       resolvedUrl = resolvedUrl.replace("{SUPABASE_URL}", supabaseUrlEnv.replace(/\/$/, ""));
-    }
 
     const payload = {
       meta: { tool_name: tool.name, tool_run_id: toolRunId, user_id: userId, conversation_id: conversationId },
       input,
     };
 
-    let lastError: string = "";
+    let lastError = "";
     for (let attempt = 0; attempt <= ep.max_retries; attempt++) {
       try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), ep.timeout_ms);
-
+        const ac = new AbortController();
+        const timeout = setTimeout(() => ac.abort(), ep.timeout_ms);
         const resp = await fetch(resolvedUrl, {
           method: ep.http_method,
           headers: {
             "Content-Type": "application/json",
             ...(ep.headers as Record<string, string>),
-            // Add service role auth for internal Supabase function calls
             ...(resolvedUrl.includes(Deno.env.get("SUPABASE_URL") || "NONE") ? {
               Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || ""}`,
               apikey: Deno.env.get("SUPABASE_ANON_KEY") || "",
             } : {}),
           },
           body: JSON.stringify(payload),
-          signal: controller.signal,
+          signal: ac.signal,
         });
         clearTimeout(timeout);
 
@@ -605,65 +515,31 @@ async function executeToolRun(
 
         const result = await resp.json();
         await supabase.from("tool_runs").update({
-          status: "completed",
-          output: result,
-          completed_at: new Date().toISOString(),
+          status: "completed", output: result, completed_at: new Date().toISOString(),
         }).eq("id", toolRunId);
 
-        // Insert tool result as message
         const resultContent = result.markdown_content || JSON.stringify(result);
+        const { data: runData } = await supabase.from("tool_runs").select("tool_call_id").eq("id", toolRunId).single();
         await supabase.from("messages").insert({
-          conversation_id: conversationId,
-          user_id: userId,
-          role: "tool",
-          content: resultContent,
-          tool_call_id: (await supabase.from("tool_runs").select("tool_call_id").eq("id", toolRunId).single()).data?.tool_call_id,
+          conversation_id: conversationId, user_id: userId,
+          role: "tool", content: resultContent, tool_call_id: runData?.tool_call_id,
         });
-
         return;
       } catch (err: any) {
         if (err.name === "AbortError") {
           lastError = "Request timed out";
-          if (attempt < ep.max_retries) {
-            await delay(Math.pow(2, attempt) * 500);
-            continue;
-          }
+          if (attempt < ep.max_retries) { await delay(Math.pow(2, attempt) * 500); continue; }
         }
         lastError = err.message;
       }
     }
 
     await supabase.from("tool_runs").update({
-      status: "failed",
-      error: lastError,
-      completed_at: new Date().toISOString(),
+      status: "failed", error: lastError, completed_at: new Date().toISOString(),
     }).eq("id", toolRunId);
   } catch (e: any) {
     await supabase.from("tool_runs").update({
-      status: "failed",
-      error: e.message,
-      completed_at: new Date().toISOString(),
+      status: "failed", error: e.message, completed_at: new Date().toISOString(),
     }).eq("id", toolRunId);
   }
-}
-
-async function fetchWithRetry(url: string, options: RequestInit, maxRetries = 3): Promise<Response> {
-  for (let i = 0; i <= maxRetries; i++) {
-    try {
-      const resp = await fetch(url, options);
-      if (resp.status === 429 && i < maxRetries) {
-        await delay(Math.pow(2, i) * 1000 + Math.random() * 1000);
-        continue;
-      }
-      return resp;
-    } catch (e) {
-      if (i === maxRetries) throw e;
-      await delay(Math.pow(2, i) * 1000);
-    }
-  }
-  throw new Error("Max retries exceeded");
-}
-
-function delay(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

@@ -24,3 +24,4 @@ supabase/.temp/
 *.sln
 *.sw?
 .vercel
+.playwright-cli/
