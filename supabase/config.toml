@@ -20,3 +20,9 @@ verify_jwt = false
 
 [functions.jobs-resume]
 verify_jwt = false
+
+[functions.search-web]
+verify_jwt = false
+
+[functions.links-demo]
+verify_jwt = false
