@@ -352,6 +352,10 @@ export type Database = {
           resume_token: Json
           execution_log: Json
           healing_log: Json
+          current_node_id: string | null
+          completed_nodes: string[]
+          failed_nodes: string[]
+          node_results: Json
           created_at: string
           updated_at: string
           started_at: string | null
@@ -372,6 +376,10 @@ export type Database = {
           resume_token?: Json
           execution_log?: Json
           healing_log?: Json
+          current_node_id?: string | null
+          completed_nodes?: string[]
+          failed_nodes?: string[]
+          node_results?: Json
           created_at?: string
           updated_at?: string
           started_at?: string | null
@@ -392,6 +400,10 @@ export type Database = {
           resume_token?: Json
           execution_log?: Json
           healing_log?: Json
+          current_node_id?: string | null
+          completed_nodes?: string[]
+          failed_nodes?: string[]
+          node_results?: Json
           created_at?: string
           updated_at?: string
           started_at?: string | null

@@ -15,7 +15,7 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type",
 };
 
-const RESUMABLE_STATES = ["failed", "paused", "waiting_for_login", "waiting_for_approval"];
+const RESUMABLE_STATES = ["failed", "paused", "waiting_for_login", "waiting_for_approval", "waiting_for_delay"];
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -63,6 +63,7 @@ Deno.serve(async (req) => {
   try {
     const body = await req.json().catch(() => ({}));
     const jobRunId = body.job_run_id as string;
+    const nodeId = body.node_id as string | undefined; // Optional: re-run a specific node
 
     if (!jobRunId) {
       return new Response(JSON.stringify({ error: "job_run_id is required" }), {
@@ -120,12 +121,26 @@ Deno.serve(async (req) => {
       });
     }
 
-    // Reset execution state for resume
-    await supabase.from("execution_state").update({
+    // Reset execution state for resume — preserve completed_nodes for DAG partial re-run
+    const updatePayload: Record<string, unknown> = {
       status: "queued",
       last_error: null,
       last_error_class: null,
-    }).eq("id", execState.id);
+    };
+
+    // If a specific node_id is provided, remove it from completed/failed to force re-run
+    if (nodeId) {
+      const completedNodes: string[] = (execState.completed_nodes as string[]) || [];
+      const failedNodes: string[] = (execState.failed_nodes as string[]) || [];
+      const nodeResults: Record<string, unknown> = (execState.node_results as Record<string, unknown>) || {};
+
+      updatePayload.completed_nodes = completedNodes.filter((n: string) => n !== nodeId);
+      updatePayload.failed_nodes = failedNodes.filter((n: string) => n !== nodeId);
+      delete nodeResults[nodeId];
+      updatePayload.node_results = nodeResults;
+    }
+
+    await supabase.from("execution_state").update(updatePayload).eq("id", execState.id);
 
     // Reset job_run status to pending so jobs-run will pick it up
     await supabase.from("job_runs").update({
@@ -150,7 +165,10 @@ Deno.serve(async (req) => {
       message: "Job resumed",
       job_run_id: jobRunId,
       execution_state_id: execState.id,
+      resumed_from_node: execState.current_node_id || null,
       resumed_from_step: execState.current_step,
+      node_id_rerun: nodeId || null,
+      completed_nodes_preserved: (execState.completed_nodes as string[] || []).length,
       retry_count: execState.retry_count + 1,
       jobs_run_result: result,
     }), {

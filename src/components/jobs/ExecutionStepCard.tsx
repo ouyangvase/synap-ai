@@ -12,10 +12,13 @@ import {
 import type { Json } from "@/integrations/supabase/types";
 
 interface StepResult {
-  step: number;
+  step?: number;
+  node_id?: string;
+  label?: string;
+  type?: string;
   phase: string;
   action: string;
-  status: "completed" | "failed" | "skipped";
+  status: "completed" | "failed" | "skipped" | "waiting";
   result?: unknown;
   error?: string;
   error_class?: string;
@@ -45,6 +48,11 @@ const statusConfig: Record<string, { icon: React.ReactNode; color: string; bg: s
     icon: <XCircle className="w-3.5 h-3.5" />,
     color: "text-red-400",
     bg: "bg-red-500/10 border-red-500/20",
+  },
+  waiting: {
+    icon: <Loader className="w-3.5 h-3.5 animate-spin" />,
+    color: "text-amber-400",
+    bg: "bg-amber-500/10 border-amber-500/20",
   },
   skipped: {
     icon: <Clock className="w-3.5 h-3.5" />,
@@ -78,9 +86,9 @@ export default function ExecutionStepCard({ step, isActive }: ExecutionStepCardP
         onClick={() => setExpanded(!expanded)}
         className="w-full flex items-center gap-2 px-3 py-2 text-left"
       >
-        {/* Step number */}
-        <span className="text-xs text-muted-foreground font-mono w-5 shrink-0">
-          {step.step + 1}
+        {/* Step/Node identifier */}
+        <span className="text-xs text-muted-foreground font-mono w-auto shrink-0">
+          {step.node_id || step.label || (step.step !== undefined ? step.step + 1 : "?")}
         </span>
 
         {/* Status icon */}

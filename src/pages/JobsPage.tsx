@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, lazy, Suspense } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { useNavigate } from "react-router-dom";
@@ -44,9 +44,14 @@ import {
   Wrench,
   RefreshCw,
   Ban,
+  GitBranch,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import ExecutionStepCard from "@/components/jobs/ExecutionStepCard";
+
+// Lazy-load React Flow components to minimize initial bundle size (~150KB)
+const WorkflowEditor = lazy(() => import("@/components/jobs/WorkflowEditor"));
+const WorkflowExecutionView = lazy(() => import("@/components/jobs/WorkflowExecutionView"));
 
 // ---------------------------------------------------------------------------
 // Types
@@ -70,6 +75,7 @@ interface Job {
   created_at: string;
   updated_at: string | null;
   user_id: string | null;
+  workflow: { nodes: Array<Record<string, unknown>>; edges: Array<Record<string, unknown>> } | null;
 }
 
 interface JobRun {
@@ -371,6 +377,7 @@ export default function JobsPage() {
         timezone: "Asia/Kuala_Lumpur",
         is_active: false,
         task_config: {},
+        workflow: newTaskType === "browser_flow" ? { nodes: [], edges: [] } : null,
       })
       .select()
       .single();
@@ -662,6 +669,11 @@ export default function JobsPage() {
                 <TabsTrigger value="settings" className="gap-1.5">
                   <Settings className="w-3.5 h-3.5" /> Settings
                 </TabsTrigger>
+                {selectedJob.task_type === "browser_flow" && (
+                  <TabsTrigger value="workflow" className="gap-1.5">
+                    <GitBranch className="w-3.5 h-3.5" /> Workflow
+                  </TabsTrigger>
+                )}
                 <TabsTrigger value="execution" className="gap-1.5">
                   <Wrench className="w-3.5 h-3.5" /> Execution
                 </TabsTrigger>
@@ -669,6 +681,40 @@ export default function JobsPage() {
                   <History className="w-3.5 h-3.5" /> Run History
                 </TabsTrigger>
               </TabsList>
+
+              {/* ---- Workflow Tab (DAG Editor) ---- */}
+              {selectedJob.task_type === "browser_flow" && (
+                <TabsContent value="workflow" className="flex-1 overflow-hidden mt-0" style={{ minHeight: 500 }}>
+                  <Suspense fallback={
+                    <div className="flex items-center justify-center h-full">
+                      <Loader className="w-5 h-5 animate-spin text-muted-foreground" />
+                    </div>
+                  }>
+                    <WorkflowEditor
+                      initialNodes={(selectedJob.workflow?.nodes || []) as any[]}
+                      initialEdges={(selectedJob.workflow?.edges || []) as any[]}
+                      onSave={async (nodes, edges) => {
+                        const { error } = await (supabase as any)
+                          .from("jobs")
+                          .update({
+                            workflow: { nodes, edges },
+                            updated_at: new Date().toISOString(),
+                          })
+                          .eq("id", selectedJob.id);
+                        if (error) throw new Error(error.message);
+                        // Refresh selected job
+                        const { data: refreshed } = await (supabase as any)
+                          .from("jobs")
+                          .select("*")
+                          .eq("id", selectedJob.id)
+                          .single();
+                        if (refreshed) setSelectedJob(refreshed as Job);
+                        await fetchJobs();
+                      }}
+                    />
+                  </Suspense>
+                </TabsContent>
+              )}
 
               {/* ---- Settings Tab ---- */}
               <TabsContent value="settings" className="flex-1 overflow-y-auto p-4 space-y-6 mt-0">
@@ -836,7 +882,43 @@ export default function JobsPage() {
 
               {/* ---- Execution Tab ---- */}
               <TabsContent value="execution" className="flex-1 overflow-y-auto p-4 mt-0 space-y-4">
-                {executionState ? (
+                {/* DAG Workflow Execution View */}
+                {selectedJob.task_type === "browser_flow" && selectedJob.workflow && (selectedJob.workflow.nodes?.length || 0) > 0 && executionState ? (
+                  <Suspense fallback={
+                    <div className="flex items-center justify-center h-64">
+                      <Loader className="w-5 h-5 animate-spin text-muted-foreground" />
+                    </div>
+                  }>
+                    <div style={{ height: 500 }}>
+                      <WorkflowExecutionView
+                        workflowNodes={(selectedJob.workflow.nodes || []) as any[]}
+                        workflowEdges={(selectedJob.workflow.edges || []) as any[]}
+                        executionState={executionState}
+                        onResume={jobRuns[0] ? () => handleResumeExecution(jobRuns[0].id) : undefined}
+                        onCancel={executionState?.id ? () => handleCancelExecution(executionState.id as string) : undefined}
+                        onRerunNode={jobRuns[0] ? async (nodeId: string) => {
+                          const RESUME_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/jobs-resume`;
+                          const resp = await fetch(RESUME_URL, {
+                            method: "POST",
+                            headers: {
+                              "Content-Type": "application/json",
+                              Authorization: `Bearer ${session?.access_token}`,
+                              apikey: import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
+                            },
+                            body: JSON.stringify({ job_run_id: jobRuns[0].id, node_id: nodeId }),
+                          });
+                          const result = await resp.json();
+                          if (!resp.ok) toast({ title: "Re-run failed", description: result.error, variant: "destructive" });
+                          else {
+                            toast({ title: "Node re-run started", description: `Re-running node ${nodeId}` });
+                            fetchJobRuns(selectedJob.id);
+                          }
+                        } : undefined}
+                        resuming={resumingJob}
+                      />
+                    </div>
+                  </Suspense>
+                ) : executionState ? (
                   <>
                     {/* Status + Phase */}
                     <div className="flex items-center gap-3 flex-wrap">

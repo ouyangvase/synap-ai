@@ -1356,6 +1356,146 @@ Deno.serve(async (req) => {
         });
       }
 
+      // ── Individual tool → browser_do mapping ──
+      // The LLM is given individual tools (browser_start, browser_click, etc.)
+      // but /agent-action only implements browser_do and browser_get_html.
+      // Map individual tool calls to equivalent browser_do composite steps.
+      const toolToStepMapping: Record<string, () => Promise<Response>> = {
+        browser_start: async () => {
+          let startUrl = (input.url as string) || "about:blank";
+          if (startUrl && !startUrl.startsWith("http://") && !startUrl.startsWith("https://") && startUrl !== "about:blank") {
+            startUrl = "https://" + startUrl;
+          }
+          const script = buildCompositeScript(startUrl, []);
+          const resp = await fetchWithTimeout(`${bl.baseUrl}/function?token=${bl.token}`, {
+            method: "POST", headers: { "Content-Type": "application/javascript" }, body: script, timeout: 55_000,
+          });
+          if (!resp.ok) {
+            const errText = await resp.text();
+            return jsonResp({ error: `Browser start failed (${resp.status})`, detail: errText.slice(0, 500), markdown_content: `Browser start failed: ${errText.slice(0, 300)}` }, 502);
+          }
+          const contentType = resp.headers.get("content-type") || "";
+          let result: Record<string, unknown> = {};
+          if (contentType.includes("application/json")) { const raw = await resp.json(); result = raw.data || raw.result || raw; }
+          else { const text = await resp.text(); result = { raw_text: text.substring(0, 10000) }; }
+          return jsonResp({ success: true, url: startUrl, title: result.title || "", content: (result.content as string || "").substring(0, 8000), screenshot: result.screenshot || null, markdown_content: `Browser started and navigated to ${startUrl}\n\nPage title: ${result.title || "(loading)"}\nURL: ${startUrl}` });
+        },
+
+        browser_navigate: async () => {
+          let navUrl = (input.url as string) || "";
+          if (navUrl && !navUrl.startsWith("http://") && !navUrl.startsWith("https://")) navUrl = "https://" + navUrl;
+          const steps = [{ action: "navigate", url: navUrl }];
+          const script = buildCompositeScript(navUrl, steps);
+          const resp = await fetchWithTimeout(`${bl.baseUrl}/function?token=${bl.token}`, {
+            method: "POST", headers: { "Content-Type": "application/javascript" }, body: script, timeout: 55_000,
+          });
+          if (!resp.ok) { const errText = await resp.text(); return jsonResp({ error: `Navigation failed`, detail: errText.slice(0, 500), markdown_content: `Navigation to ${navUrl} failed: ${errText.slice(0, 300)}` }, 502); }
+          const contentType = resp.headers.get("content-type") || "";
+          let result: Record<string, unknown> = {};
+          if (contentType.includes("application/json")) { const raw = await resp.json(); result = raw.data || raw.result || raw; }
+          else { const text = await resp.text(); result = { raw_text: text.substring(0, 10000) }; }
+          return jsonResp({ success: true, url: navUrl, title: result.title || "", markdown_content: `Navigated to ${navUrl}\n\nPage title: ${result.title || "(unknown)"}` });
+        },
+
+        browser_click: async () => {
+          const selector = (input.selector as string) || "";
+          const steps = [{ action: "click", selector }];
+          const script = buildCompositeScript("", steps);
+          const resp = await fetchWithTimeout(`${bl.baseUrl}/function?token=${bl.token}`, {
+            method: "POST", headers: { "Content-Type": "application/javascript" }, body: script, timeout: 55_000,
+          });
+          if (!resp.ok) { const errText = await resp.text(); return jsonResp({ error: `Click failed`, detail: errText.slice(0, 500), markdown_content: `Click on "${selector}" failed: ${errText.slice(0, 300)}` }, 502); }
+          const contentType = resp.headers.get("content-type") || "";
+          let result: Record<string, unknown> = {};
+          if (contentType.includes("application/json")) { const raw = await resp.json(); result = raw.data || raw.result || raw; }
+          else { const text = await resp.text(); result = { raw_text: text.substring(0, 10000) }; }
+          return jsonResp({ success: true, url: result.url || "", step_results: result.step_results || [], markdown_content: `Clicked element: ${selector}\n\nCurrent URL: ${result.url || "(unknown)"}` });
+        },
+
+        browser_type: async () => {
+          const selector = (input.selector as string) || "";
+          const text = (input.text as string) || "";
+          const clear = (input.clear as boolean) || false;
+          const steps = [{ action: "type", selector, text, clear }];
+          const script = buildCompositeScript("", steps);
+          const resp = await fetchWithTimeout(`${bl.baseUrl}/function?token=${bl.token}`, {
+            method: "POST", headers: { "Content-Type": "application/javascript" }, body: script, timeout: 55_000,
+          });
+          if (!resp.ok) { const errText = await resp.text(); return jsonResp({ error: `Type failed`, detail: errText.slice(0, 500), markdown_content: `Typing into "${selector}" failed: ${errText.slice(0, 300)}` }, 502); }
+          const contentType = resp.headers.get("content-type") || "";
+          let result: Record<string, unknown> = {};
+          if (contentType.includes("application/json")) { const raw = await resp.json(); result = raw.data || raw.result || raw; }
+          else { const t = await resp.text(); result = { raw_text: t.substring(0, 10000) }; }
+          return jsonResp({ success: true, url: result.url || "", markdown_content: `Typed "${text}" into ${selector}` });
+        },
+
+        browser_screenshot: async () => {
+          const steps = [{ action: "screenshot" }];
+          const script = buildCompositeScript("", steps);
+          const resp = await fetchWithTimeout(`${bl.baseUrl}/function?token=${bl.token}`, {
+            method: "POST", headers: { "Content-Type": "application/javascript" }, body: script, timeout: 55_000,
+          });
+          if (!resp.ok) { const errText = await resp.text(); return jsonResp({ error: `Screenshot failed`, markdown_content: `Screenshot failed: ${errText.slice(0, 300)}` }, 502); }
+          const contentType = resp.headers.get("content-type") || "";
+          let result: Record<string, unknown> = {};
+          if (contentType.includes("application/json")) { const raw = await resp.json(); result = raw.data || raw.result || raw; }
+          else { const t = await resp.text(); result = { raw_text: t.substring(0, 10000) }; }
+          return jsonResp({ success: true, screenshot: result.screenshot || null, url: result.url || "", title: result.title || "", markdown_content: `Screenshot taken of current page: ${result.title || result.url || "(unknown)"}` });
+        },
+
+        browser_extract: async () => {
+          const selector = (input.selector as string) || "body";
+          const steps = [{ action: "extract", selector }];
+          const script = buildCompositeScript("", steps);
+          const resp = await fetchWithTimeout(`${bl.baseUrl}/function?token=${bl.token}`, {
+            method: "POST", headers: { "Content-Type": "application/javascript" }, body: script, timeout: 55_000,
+          });
+          if (!resp.ok) { const errText = await resp.text(); return jsonResp({ error: `Extract failed`, markdown_content: `Extract from "${selector}" failed: ${errText.slice(0, 300)}` }, 502); }
+          const contentType = resp.headers.get("content-type") || "";
+          let result: Record<string, unknown> = {};
+          if (contentType.includes("application/json")) { const raw = await resp.json(); result = raw.data || raw.result || raw; }
+          else { const t = await resp.text(); result = { raw_text: t.substring(0, 10000) }; }
+          return jsonResp({ success: true, content: (result.content as string || "").substring(0, 8000), url: result.url || "", markdown_content: `Extracted text from ${selector}:\n\n${(result.content as string || "").substring(0, 8000)}` });
+        },
+
+        browser_scroll: async () => {
+          const direction = (input.direction as string) || "down";
+          const amount = Number(input.amount) || 500;
+          const steps = [{ action: "scroll", direction, amount }];
+          const script = buildCompositeScript("", steps);
+          const resp = await fetchWithTimeout(`${bl.baseUrl}/function?token=${bl.token}`, {
+            method: "POST", headers: { "Content-Type": "application/javascript" }, body: script, timeout: 55_000,
+          });
+          if (!resp.ok) { const errText = await resp.text(); return jsonResp({ error: `Scroll failed`, markdown_content: `Scroll failed: ${errText.slice(0, 300)}` }, 502); }
+          return jsonResp({ success: true, markdown_content: `Scrolled ${direction} ${amount}px` });
+        },
+
+        browser_select: async () => {
+          const selector = (input.selector as string) || "";
+          const value = (input.value as string) || "";
+          const steps = [{ action: "select", selector, value }];
+          const script = buildCompositeScript("", steps);
+          const resp = await fetchWithTimeout(`${bl.baseUrl}/function?token=${bl.token}`, {
+            method: "POST", headers: { "Content-Type": "application/javascript" }, body: script, timeout: 55_000,
+          });
+          if (!resp.ok) { const errText = await resp.text(); return jsonResp({ error: `Select failed`, markdown_content: `Select "${value}" in ${selector} failed: ${errText.slice(0, 300)}` }, 502); }
+          return jsonResp({ success: true, markdown_content: `Selected "${value}" in ${selector}` });
+        },
+
+        browser_stop: async () => {
+          return jsonResp({ success: true, markdown_content: "Browser session closed." });
+        },
+
+        browser_wait_for_user: async () => {
+          const instruction = (input.instruction as string) || "Complete the action";
+          return jsonResp({ success: true, waiting: true, instruction, markdown_content: `Waiting for user action: ${instruction}` });
+        },
+      };
+
+      if (toolToStepMapping[toolName]) {
+        return await toolToStepMapping[toolName]();
+      }
+
       return jsonResp({ error: `Unknown tool: ${toolName}`, markdown_content: `Unknown browser tool: ${toolName}` }, 400);
     } catch (err) {
       return jsonResp({
@@ -2602,6 +2742,19 @@ function buildCompositeScript(
         `);
         break;
       }
+
+      // ── Select from dropdown by value ──
+      case "select_option":
+        stepCode.push(`
+          try {
+            const sel = ${selector};
+            const val = ${value};
+            await page.waitForSelector(sel, { timeout: 10000 });
+            await page.select(sel, val);
+            stepResults.push("Selected option " + val + " in " + sel);
+          } catch(e) { stepResults.push("select_option failed: " + e.message); }
+        `);
+        break;
 
       default:
         stepCode.push(`stepResults.push("Unknown action: ${action}");`);

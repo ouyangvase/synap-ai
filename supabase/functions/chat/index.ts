@@ -306,13 +306,22 @@ serve(async (req) => {
                   controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "tool_result", tool_run_id: toolRun.id })}\n\n`));
 
                   const { data: completedRun } = await supabase
-                    .from("tool_runs").select("output, status, tool_call_id").eq("id", toolRun.id).single();
+                    .from("tool_runs")
+                    .select("output, status, error, tool_call_id")
+                    .eq("id", toolRun.id)
+                    .single();
 
                   if (completedRun) {
-                    const rc = completedRun.output?.markdown_content || JSON.stringify(completedRun.output || {});
+                    let resultContent: string;
+                    if (completedRun.status === "failed") {
+                      // CRITICAL: Pass error information to the LLM so it can debug and retry
+                      resultContent = `ERROR: Tool "${tool.name}" failed.\nError: ${completedRun.error || "Unknown error"}\nPlease analyze the error and try a different approach.`;
+                    } else {
+                      resultContent = completedRun.output?.markdown_content || JSON.stringify(completedRun.output || {});
+                    }
                     toolResultMsgs.push({
                       role: "tool",
-                      content: (typeof rc === "string" ? rc : JSON.stringify(rc)).substring(0, 15000),
+                      content: (typeof resultContent === "string" ? resultContent : JSON.stringify(resultContent)).substring(0, 15000),
                       tool_call_id: completedRun.tool_call_id,
                     });
                   }
