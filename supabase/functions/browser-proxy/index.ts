@@ -655,6 +655,40 @@ Deno.serve(async (req) => {
     const meta = (body.meta as Record<string, unknown>) || {};
     const toolName = (meta.tool_name as string) || "";
 
+    // ── Resolve current URL for stateless reconnect pattern ──
+    // Look up the last successful browser tool_run for this conversation
+    // so we can navigate there before performing the next action.
+    let currentUrl: string | null = null;
+    const conversationId = (meta.conversation_id as string) || "";
+    if (conversationId) {
+      try {
+        const supabase = createClient(supabaseUrl, supabaseServiceKey);
+        const { data: lastRun } = await supabase
+          .from("tool_runs")
+          .select("output")
+          .eq("conversation_id", conversationId)
+          .eq("status", "completed")
+          .in("tool_id", [
+            "00000000-0000-0000-0001-000000000001", // browser_start
+            "00000000-0000-0000-0001-000000000002", // browser_navigate
+            "00000000-0000-0000-0001-000000000003", // browser_click
+            "00000000-0000-0000-0001-000000000004", // browser_type
+            "00000000-0000-0000-0001-000000000005", // browser_screenshot
+            "00000000-0000-0000-0001-000000000006", // browser_extract
+            "00000000-0000-0000-0001-000000000007", // browser_scroll
+            "00000000-0000-0000-0001-000000000008", // browser_select
+            "00000000-0000-0000-0001-000000000012", // browser_get_html
+          ])
+          .order("completed_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (lastRun?.output) {
+          currentUrl = (lastRun.output as Record<string, unknown>).url as string || null;
+        }
+      } catch { /* ignore — first call won't have history */ }
+    }
+
     try {
       // ── browser_do: Multi-step browser automation ──
       // The AI sends a JSON array of steps that execute within a single browser.
@@ -885,23 +919,149 @@ Deno.serve(async (req) => {
         });
       }
 
-      // ── browser_get_html ── (CRITICAL for autonomous operation)
-      if (toolName === "browser_get_html") {
-        const selector = (input.selector as string) || "body";
-        const maxLen = (input.max_length as number) || 8000;
-        const result = await executeBrowserlessAction(bl, "get_html", { selector, max_length: maxLen }, currentUrl);
-        const data = result.data as Record<string, unknown> || {};
-        const html = ((data.html as string) || "").substring(0, maxLen);
+      // ── Individual browser tools ──
+      // Maps tool names from the database to action types in executeBrowserlessAction.
+      // Each call spins up a fresh browser, reconnects to currentUrl, performs the action.
 
+      const toolToAction: Record<string, string> = {
+        browser_start: "navigate",
+        browser_navigate: "navigate",
+        browser_click: "click",
+        browser_type: "type",
+        browser_screenshot: "screenshot",
+        browser_extract: "extract",
+        browser_scroll: "scroll",
+        browser_select: "select",
+        browser_get_html: "get_html",
+      };
+
+      if (toolName === "browser_stop") {
         return jsonResp({
-          html,
-          selector,
-          title: data.title || "",
-          url: data.url || currentUrl || "",
+          success: true,
+          markdown_content: "Browser session closed.",
+        });
+      }
+
+      if (toolName === "browser_wait_for_user") {
+        const instruction = (input.instruction as string) || "Please complete the required action.";
+        return jsonResp({
+          success: true,
+          waiting: true,
+          instruction,
+          markdown_content: `**Waiting for user action:** ${instruction}`,
+        });
+      }
+
+      const actionType = toolToAction[toolName];
+      if (actionType) {
+        // Build parameters for the action
+        let actionParams: Record<string, unknown> = { ...input };
+        let actionCurrentUrl = currentUrl;
+
+        // For browser_start / browser_navigate, the URL comes from input
+        if (toolName === "browser_start" || toolName === "browser_navigate") {
+          let targetUrl = (input.url as string) || "";
+          if (targetUrl && !targetUrl.startsWith("http://") && !targetUrl.startsWith("https://")) {
+            targetUrl = "https://" + targetUrl;
+          }
+          actionParams = { url: targetUrl || "about:blank" };
+          actionCurrentUrl = null; // Don't reconnect — navigate directly
+        }
+
+        const result = await executeBrowserlessAction(bl, actionType, actionParams, actionCurrentUrl);
+        const data = (result.data as Record<string, unknown>) || {};
+
+        // Build the response based on tool type
+        const finalUrl = (data.url as string) || (result.final_url as string) || currentUrl || "";
+        const title = (data.title as string) || "";
+
+        // Specific formatting per tool type
+        if (toolName === "browser_get_html") {
+          const html = ((data.html as string) || "").substring(0, (input.max_length as number) || 8000);
+          return jsonResp({
+            html,
+            selector: input.selector || "body",
+            title,
+            url: finalUrl,
+            success: result.success,
+            markdown_content: result.success
+              ? `HTML structure of \`${input.selector || "body"}\` on ${finalUrl}:\n\n\`\`\`html\n${html}\n\`\`\``
+              : `Failed to get HTML: ${result.error}`,
+          });
+        }
+
+        if (toolName === "browser_screenshot") {
+          const screenshot = (data.screenshot as string) || null;
+          return jsonResp({
+            success: result.success,
+            title,
+            url: finalUrl,
+            screenshot: screenshot ? screenshot.substring(0, 100000) : null,
+            markdown_content: result.success
+              ? `Screenshot taken of ${title || finalUrl}.\n\nCurrent URL: ${finalUrl}`
+              : `Failed to take screenshot: ${result.error}`,
+          });
+        }
+
+        if (toolName === "browser_extract") {
+          const content = (data.content as string) || "";
+          return jsonResp({
+            success: result.success,
+            title,
+            url: finalUrl,
+            content: content.substring(0, 8000),
+            markdown_content: result.success
+              ? `# ${title || finalUrl}\n\nExtracted from \`${input.selector || "body"}\`:\n\n${content.substring(0, 8000)}`
+              : `Failed to extract content: ${result.error}`,
+          });
+        }
+
+        if (toolName === "browser_start" || toolName === "browser_navigate") {
+          return jsonResp({
+            success: result.success,
+            title,
+            url: finalUrl,
+            navigated: true,
+            markdown_content: result.success
+              ? `Navigated to **${title || finalUrl}**\n\nURL: ${finalUrl}`
+              : `Failed to navigate: ${result.error}`,
+          });
+        }
+
+        if (toolName === "browser_click") {
+          return jsonResp({
+            success: result.success,
+            title,
+            url: finalUrl,
+            clicked: input.selector,
+            markdown_content: result.success
+              ? `Clicked \`${input.selector}\` on ${title || finalUrl}\n\nCurrent URL: ${finalUrl}`
+              : `Failed to click \`${input.selector}\`: ${result.error}`,
+          });
+        }
+
+        if (toolName === "browser_type") {
+          return jsonResp({
+            success: result.success,
+            title,
+            url: finalUrl,
+            typed: true,
+            selector: input.selector,
+            markdown_content: result.success
+              ? `Typed "${(input.text as string || "").substring(0, 50)}" into \`${input.selector}\`\n\nCurrent URL: ${finalUrl}`
+              : `Failed to type into \`${input.selector}\`: ${result.error}`,
+          });
+        }
+
+        // Generic response for scroll, select, etc.
+        return jsonResp({
           success: result.success,
+          title,
+          url: finalUrl,
+          data,
           markdown_content: result.success
-            ? `HTML structure of \`${selector}\` on ${data.url || currentUrl}:\n\n\`\`\`html\n${html}\n\`\`\``
-            : `Failed to get HTML: ${result.error}`,
+            ? `Action \`${toolName}\` completed.\n\nCurrent URL: ${finalUrl}`
+            : `Action \`${toolName}\` failed: ${result.error}`,
         });
       }
 

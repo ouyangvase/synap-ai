@@ -10,6 +10,7 @@ import ChatPage from "./pages/ChatPage";
 import BrowserAgentPage from "./pages/BrowserAgentPage";
 import JobsPage from "./pages/JobsPage";
 import ImageGenPage from "./pages/ImageGenPage";
+import VerifiedSearchPage from "./pages/VerifiedSearchPage";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -43,6 +44,7 @@ const App = () => (
               <Route path="/browser" element={<ProtectedRoute><BrowserAgentPage /></ProtectedRoute>} />
               <Route path="/images" element={<ProtectedRoute><ImageGenPage /></ProtectedRoute>} />
               <Route path="/jobs" element={<ProtectedRoute><JobsPage /></ProtectedRoute>} />
+              <Route path="/search" element={<ProtectedRoute><VerifiedSearchPage /></ProtectedRoute>} />
               <Route path="*" element={<NotFound />} />
             </Routes>
           </AuthProvider>
