@@ -1768,8 +1768,8 @@ function buildCompositeScript(
             const txt = ${JSON.stringify((step.text as string) || "")};
             const clicked = await helpers.clickByText(page, txt);
             if (clicked) {
-              await new Promise(r => setTimeout(r, 1500));
-              await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 8000 }).catch(() => {});
+              await new Promise(r => setTimeout(r, 1000));
+              await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 5000 }).catch(() => {});
               stepResults.push("Clicked element with text \\"" + txt + "\\"");
             } else {
               const domHint = await helpers.getAvailableButtons(page);
@@ -1789,8 +1789,8 @@ function buildCompositeScript(
             const name = ${JSON.stringify((step.name as string) || "")};
             const clicked = await helpers.clickByRole(page, role, name);
             if (clicked) {
-              await new Promise(r => setTimeout(r, 1500));
-              await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 8000 }).catch(() => {});
+              await new Promise(r => setTimeout(r, 1000));
+              await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 5000 }).catch(() => {});
               stepResults.push("Clicked " + role + " \\"" + name + "\\"");
             } else {
               const domHint = await helpers.getAvailableButtons(page);
@@ -1809,8 +1809,8 @@ function buildCompositeScript(
             const intent = ${JSON.stringify((step.intent as string) || "submit")};
             const clicked = await helpers.clickBestMatch(page, intent);
             if (clicked) {
-              await new Promise(r => setTimeout(r, 1500));
-              await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 8000 }).catch(() => {});
+              await new Promise(r => setTimeout(r, 1000));
+              await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 5000 }).catch(() => {});
               stepResults.push("Clicked best match for intent \\"" + intent + "\\"");
             } else {
               const domHint = await helpers.getAvailableButtons(page);
@@ -1867,7 +1867,8 @@ function buildCompositeScript(
 
       case "navigate":
         stepCode.push(`
-          await page.goto(${url}, { waitUntil: "networkidle2", timeout: 30000 });
+          await page.goto(${url}, { waitUntil: "domcontentloaded", timeout: 20000 });
+          await new Promise(r => setTimeout(r, 1000));
           stepResults.push("Navigated to " + ${url});
         `);
         break;
@@ -1875,10 +1876,10 @@ function buildCompositeScript(
       case "click":
         stepCode.push(`
           try {
-            await page.waitForSelector(${selector}, { timeout: 10000 });
+            await page.waitForSelector(${selector}, { timeout: 8000 });
             await page.click(${selector});
-            await new Promise(r => setTimeout(r, 1000));
-            await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 8000 }).catch(() => {});
+            await new Promise(r => setTimeout(r, 800));
+            await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 5000 }).catch(() => {});
             stepResults.push("Clicked " + ${selector});
           } catch(e) { stepResults.push("Click failed on " + ${selector} + ": " + e.message); }
         `);
@@ -2258,8 +2259,8 @@ function buildCompositeScript(
 
         // Wait for navigation
         if (clicked) {
-          await new Promise(r => setTimeout(r, 2000));
-          await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 10000 }).catch(() => {});
+          await new Promise(r => setTimeout(r, 1500));
+          await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 8000 }).catch(() => {});
           steps.push("Post-login URL: " + page.url());
         }
 
@@ -2372,9 +2373,10 @@ function buildCompositeScript(
       } catch(e) { /* page check non-fatal */ }
     }
 
-    // Navigate to start URL
+    // Navigate to start URL (use domcontentloaded instead of networkidle2 for speed)
     ${startUrl ? `
-    await page.goto(${JSON.stringify(startUrl)}, { waitUntil: "networkidle2", timeout: 30000 });
+    await page.goto(${JSON.stringify(startUrl)}, { waitUntil: "domcontentloaded", timeout: 20000 });
+    await new Promise(r => setTimeout(r, 1500)); // brief settle
     stepResults.push("Navigated to " + ${JSON.stringify(startUrl)});
     ` : ""}
 
@@ -2515,8 +2517,8 @@ function buildActionScript(
     return `
         // Reconnect: navigate to last known URL first
         await page.goto(${JSON.stringify(currentUrl)}, {
-          waitUntil: "networkidle2",
-          timeout: 30000,
+          waitUntil: "domcontentloaded",
+          timeout: 20000,
         }).catch(() => {});
     `;
   };
@@ -2525,7 +2527,7 @@ function buildActionScript(
     case "navigate":
       return `export default async function ({ page }) {
         const targetUrl = ${JSON.stringify(params.url || "about:blank")};
-        await page.goto(targetUrl, { waitUntil: "networkidle2", timeout: 45000 });
+        await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
         const title = await page.title();
         const finalUrl = page.url();
         return {
