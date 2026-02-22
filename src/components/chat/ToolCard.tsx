@@ -201,6 +201,76 @@ export function ToolCard({ toolRun, conversationId, onTakeOver, onResume }: Prop
           </div>
         </button>
 
+        {/* Thinking Mode Panel — shows plan, current step, observation, next action */}
+        {isBrowserDo && (stepResults || toolRun.status === "running") && (
+          <div className="border-t border-border/50 px-4 py-2 bg-secondary/20">
+            {(() => {
+              const steps = stepResults || [];
+              const lastCompleted = [...steps].reverse().find(s => s.status === "success");
+              const currentFail = steps.find(s => s.status === "failed");
+              const currentUrl = output ? (output as any).url || (output as any).last_url : null;
+              const isRunning = toolRun.status === "running";
+              const hasVerified = steps.some(s => s.action?.includes("verify") && s.status === "success");
+              const failCount = steps.filter(s => s.status === "failed").length;
+
+              return (
+                <div className="space-y-1.5">
+                  {/* Current status line */}
+                  <div className="flex items-center gap-2">
+                    {isRunning ? (
+                      <Loader2 className="w-3 h-3 animate-spin text-primary" />
+                    ) : hasVerified ? (
+                      <CheckCircle2 className="w-3 h-3 text-emerald-500" />
+                    ) : currentFail ? (
+                      <XCircle className="w-3 h-3 text-destructive" />
+                    ) : (
+                      <CheckCircle2 className="w-3 h-3 text-emerald-500" />
+                    )}
+                    <span className="text-[11px] font-medium">
+                      {isRunning
+                        ? `Running step ${steps.length + 1}...`
+                        : hasVerified
+                          ? "Verified"
+                          : currentFail
+                            ? `Failed at step ${steps.indexOf(currentFail) + 1}`
+                            : `${steps.filter(s => s.status === "success").length}/${steps.length} steps completed`
+                      }
+                    </span>
+                    {currentUrl && (
+                      <span className="text-[9px] text-muted-foreground ml-auto truncate max-w-[200px]">
+                        {currentUrl}
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Observation: what happened */}
+                  {lastCompleted && (
+                    <div className="text-[10px] text-muted-foreground pl-5">
+                      Last: {lastCompleted.action}
+                      {lastCompleted.value && <> &mdash; "{lastCompleted.value.slice(0, 30)}"</>}
+                      {lastCompleted.url && <> &rarr; {lastCompleted.url.slice(0, 40)}</>}
+                    </div>
+                  )}
+
+                  {/* Failure info */}
+                  {currentFail && (
+                    <div className="text-[10px] text-destructive pl-5">
+                      {currentFail.error?.slice(0, 120) || `Step ${currentFail.action} failed`}
+                    </div>
+                  )}
+
+                  {/* Verification result */}
+                  {steps.some(s => s.action?.includes("verify")) && (
+                    <div className={cn("text-[10px] pl-5 font-medium", hasVerified ? "text-emerald-500" : "text-destructive")}>
+                      {hasVerified ? "Verification passed" : failCount > 0 ? "Verification failed" : "Verifying..."}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+          </div>
+        )}
+
         {/* Step Timeline (always visible for browser_do when running or completed) */}
         {isBrowserDo && (stepResults || toolRun.status === "running") && (
           <div className="border-t border-border/50 px-4 py-2.5">

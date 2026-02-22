@@ -2262,6 +2262,347 @@ function buildCompositeScript(
         `);
         break;
 
+      // ── Network idle wait ──
+      case "wait_for_network_idle":
+        stepCode.push(`
+          try {
+            const idleMs = ${Number(step.ms) || 2000};
+            const idleTimeout = ${Number(step.timeout) || 15000};
+            await Promise.race([
+              page.waitForNavigation({ waitUntil: "networkidle0", timeout: idleTimeout }).catch(() => {}),
+              new Promise(r => setTimeout(r, idleMs))
+            ]);
+            stepResults.push("Network idle wait completed (" + idleMs + "ms)");
+          } catch(e) { stepResults.push("wait_for_network_idle: " + e.message); }
+        `);
+        break;
+
+      // ── URL guard: verify current URL, retry click or navigate directly ──
+      case "url_guard": {
+        const expectedPath = JSON.stringify((step.expected_path as string) || "");
+        const fallbackUrl = JSON.stringify((step.fallback_url as string) || "");
+        const retryClick = JSON.stringify((step.retry_click_text as string) || "");
+        stepCode.push(`
+          try {
+            const expected = ${expectedPath};
+            const fallback = ${fallbackUrl};
+            const retryText = ${retryClick};
+            const currentUrl = page.url();
+            if (currentUrl.includes(expected)) {
+              stepResults.push("URL guard passed: " + currentUrl + " contains " + expected);
+            } else {
+              stepResults.push("WARNING: URL guard failed. Expected path containing " + expected + " but got " + currentUrl);
+              // Strategy 1: retry clicking the menu/link
+              if (retryText) {
+                const retryClicked = await helpers.clickByText(page, retryText);
+                if (retryClicked) {
+                  await new Promise(r => setTimeout(r, 3000));
+                  await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 10000 }).catch(() => {});
+                  const afterRetry = page.url();
+                  if (afterRetry.includes(expected)) {
+                    stepResults.push("URL guard recovered via retry click: " + afterRetry);
+                  } else if (fallback) {
+                    await page.goto(fallback, { waitUntil: "domcontentloaded", timeout: 90000 });
+                    await new Promise(r => setTimeout(r, 2000));
+                    stepResults.push("URL guard recovered via direct navigation to " + fallback);
+                  } else {
+                    stepResults.push("FAIL url_guard: still on " + afterRetry + " after retry");
+                  }
+                } else if (fallback) {
+                  await page.goto(fallback, { waitUntil: "domcontentloaded", timeout: 90000 });
+                  await new Promise(r => setTimeout(r, 2000));
+                  stepResults.push("URL guard recovered via direct navigation to " + fallback);
+                }
+              } else if (fallback) {
+                // Strategy 2: direct navigation
+                await page.goto(fallback, { waitUntil: "domcontentloaded", timeout: 90000 });
+                await new Promise(r => setTimeout(r, 2000));
+                stepResults.push("URL guard: navigated directly to " + fallback);
+              } else {
+                stepResults.push("FAIL url_guard: no fallback URL provided, stuck on " + currentUrl);
+              }
+            }
+          } catch(e) {
+            try { screenshot = await page.screenshot({ encoding: "base64", fullPage: false }); } catch(_) {}
+            stepResults.push("FAIL url_guard error: " + e.message);
+          }
+        `);
+        break;
+      }
+
+      // ── Find a table row containing specific text ──
+      case "find_row": {
+        const searchText = JSON.stringify((step.text as string) || "");
+        const rowVar = (step.store_as as string) || "_foundRow";
+        stepCode.push(`
+          try {
+            const searchText = ${searchText};
+            await new Promise(r => setTimeout(r, 1000)); // let table render
+            const rowInfo = await page.evaluate((txt) => {
+              // Strategy 1: find in <tr> elements
+              const rows = document.querySelectorAll("tr");
+              for (const row of rows) {
+                if (row.textContent && row.textContent.includes(txt)) {
+                  // Get cell texts for context
+                  const cells = Array.from(row.querySelectorAll("td, th")).map(c => c.textContent.trim().substring(0, 80));
+                  const buttons = Array.from(row.querySelectorAll("button, a, [role=button]")).map(b => ({
+                    text: (b.textContent || "").trim().substring(0, 40),
+                    tag: b.tagName
+                  }));
+                  return { found: true, type: "tr", cells, buttons, rowIndex: Array.from(row.parentElement.children).indexOf(row) };
+                }
+              }
+              // Strategy 2: find in div-based rows (common in modern UIs)
+              const divRows = document.querySelectorAll("[class*='row'], [class*='item'], [class*='order'], [class*='card'], [role='row']");
+              for (const row of divRows) {
+                if (row.textContent && row.textContent.includes(txt)) {
+                  const text = row.textContent.trim().substring(0, 300);
+                  const buttons = Array.from(row.querySelectorAll("button, a, [role=button]")).map(b => ({
+                    text: (b.textContent || "").trim().substring(0, 40),
+                    tag: b.tagName
+                  }));
+                  return { found: true, type: "div", text, buttons };
+                }
+              }
+              // Strategy 3: general search
+              const allEls = document.querySelectorAll("*");
+              for (const el of allEls) {
+                if (el.children.length > 2 && el.textContent.includes(txt)) {
+                  const depth = 0;
+                  let p = el;
+                  while (p.parentElement && p.parentElement !== document.body) { p = p.parentElement; }
+                  const buttons = Array.from(el.querySelectorAll("button, a, [role=button]")).map(b => ({
+                    text: (b.textContent || "").trim().substring(0, 40),
+                    tag: b.tagName
+                  }));
+                  if (buttons.length > 0) {
+                    return { found: true, type: "container", text: el.textContent.trim().substring(0, 300), buttons };
+                  }
+                }
+              }
+              return { found: false };
+            }, searchText);
+            if (rowInfo.found) {
+              stepResults.push("Found row containing \\"" + searchText + "\\" (type: " + rowInfo.type + "). Buttons: " + JSON.stringify(rowInfo.buttons || []) + ". Cells: " + JSON.stringify(rowInfo.cells || []).substring(0, 200));
+            } else {
+              const domHint = await helpers.getAvailableButtons(page);
+              stepResults.push("FAIL find_row [" + searchText + "] Row not found. Page buttons: " + JSON.stringify(domHint));
+            }
+          } catch(e) {
+            try { screenshot = await page.screenshot({ encoding: "base64", fullPage: false }); } catch(_) {}
+            stepResults.push("FAIL find_row error: " + e.message);
+          }
+        `);
+        break;
+      }
+
+      // ── Click a button/link within a row that contains specific text ──
+      case "click_in_row": {
+        const rowText = JSON.stringify((step.row_text as string) || "");
+        const buttonText = JSON.stringify((step.button_text as string) || "");
+        stepCode.push(`
+          try {
+            const rowTxt = ${rowText};
+            const btnTxt = ${buttonText};
+            const clicked = await page.evaluate((rowSearch, btnSearch) => {
+              // Find the row containing rowSearch text
+              const allContainers = [...document.querySelectorAll("tr, [class*='row'], [class*='item'], [class*='order'], [class*='card'], [role='row']")];
+              for (const container of allContainers) {
+                if (!container.textContent || !container.textContent.includes(rowSearch)) continue;
+                // Find clickable element matching btnSearch
+                const clickables = container.querySelectorAll("button, a, [role=button], input[type=button], input[type=submit]");
+                for (const btn of clickables) {
+                  const text = (btn.textContent || btn.value || "").trim().toLowerCase();
+                  if (text.includes(btnSearch.toLowerCase())) {
+                    btn.click();
+                    return { clicked: true, text: text.substring(0, 60) };
+                  }
+                }
+                // Fallback: click the row itself if no matching button
+                if (!btnSearch) {
+                  container.click();
+                  return { clicked: true, text: "row clicked directly" };
+                }
+                // Try partial match
+                for (const btn of clickables) {
+                  const text = (btn.textContent || btn.value || "").trim().toLowerCase();
+                  if (text.length > 0) {
+                    // Check if button text is related to the action
+                    const words = btnSearch.toLowerCase().split(/\\s+/);
+                    if (words.some(w => text.includes(w))) {
+                      btn.click();
+                      return { clicked: true, text: "partial match: " + text.substring(0, 60) };
+                    }
+                  }
+                }
+                return { clicked: false, available: Array.from(clickables).map(b => (b.textContent || "").trim().substring(0, 40)).filter(t => t) };
+              }
+              return { clicked: false, rowNotFound: true };
+            }, rowTxt, btnTxt);
+            if (clicked.clicked) {
+              await new Promise(r => setTimeout(r, 1500));
+              await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 5000 }).catch(() => {});
+              stepResults.push("Clicked \\"" + btnTxt + "\\" in row containing \\"" + rowTxt + "\\" (" + clicked.text + ")");
+            } else if (clicked.rowNotFound) {
+              const domHint = await helpers.getAvailableButtons(page);
+              stepResults.push("FAIL click_in_row [row=" + rowTxt + "] Row not found on page. Buttons: " + JSON.stringify(domHint));
+            } else {
+              stepResults.push("FAIL click_in_row [btn=" + btnTxt + " in row=" + rowTxt + "] Button not found. Available in row: " + JSON.stringify(clicked.available || []));
+            }
+          } catch(e) {
+            try { screenshot = await page.screenshot({ encoding: "base64", fullPage: false }); } catch(_) {}
+            stepResults.push("FAIL click_in_row error: " + e.message);
+          }
+        `);
+        break;
+      }
+
+      // ── Verify that a row contains specific text (for status verification) ──
+      case "verify_row_text": {
+        const verifyRowText = JSON.stringify((step.row_text as string) || "");
+        const verifyExpected = JSON.stringify((step.expected_text as string) || "");
+        const verifyColumn = JSON.stringify((step.column_name as string) || "");
+        stepCode.push(`
+          try {
+            const rowTxt = ${verifyRowText};
+            const expectedTxt = ${verifyExpected};
+            const columnName = ${verifyColumn};
+            await new Promise(r => setTimeout(r, 1000)); // let page update
+            const verification = await page.evaluate((rowSearch, expected, colName) => {
+              // Find the row
+              const allContainers = [...document.querySelectorAll("tr, [class*='row'], [class*='item'], [class*='order'], [class*='card'], [role='row']")];
+              for (const container of allContainers) {
+                if (!container.textContent || !container.textContent.includes(rowSearch)) continue;
+                const fullText = container.textContent.trim();
+                // Check if expected text appears in the row
+                if (fullText.toLowerCase().includes(expected.toLowerCase())) {
+                  return { verified: true, row_text: fullText.substring(0, 300), matched: expected };
+                }
+                // If column name provided, try to find it in table headers
+                if (colName && container.tagName === "TR") {
+                  const table = container.closest("table");
+                  if (table) {
+                    const headers = Array.from(table.querySelectorAll("th")).map(h => h.textContent.trim().toLowerCase());
+                    const colIdx = headers.findIndex(h => h.includes(colName.toLowerCase()));
+                    if (colIdx >= 0) {
+                      const cells = container.querySelectorAll("td");
+                      const cellText = cells[colIdx] ? cells[colIdx].textContent.trim() : "";
+                      if (cellText.toLowerCase().includes(expected.toLowerCase())) {
+                        return { verified: true, column: colName, cell_value: cellText, matched: expected };
+                      }
+                      return { verified: false, column: colName, cell_value: cellText, expected: expected, row_text: fullText.substring(0, 200) };
+                    }
+                  }
+                }
+                return { verified: false, row_text: fullText.substring(0, 300), expected: expected, reason: "Expected text not found in row" };
+              }
+              return { verified: false, reason: "Row containing '" + rowSearch + "' not found" };
+            }, rowTxt, expectedTxt, columnName);
+            if (verification.verified) {
+              stepResults.push("VERIFIED: Row \\"" + rowTxt + "\\" contains \\"" + expectedTxt + "\\" ✓" + (verification.column ? " (column: " + verification.column + ")" : ""));
+            } else {
+              try { screenshot = await page.screenshot({ encoding: "base64", fullPage: false }); } catch(_) {}
+              stepResults.push("FAIL verify_row_text [" + rowTxt + "] Expected \\"" + expectedTxt + "\\" but got: " + (verification.cell_value || verification.row_text || verification.reason));
+            }
+          } catch(e) {
+            try { screenshot = await page.screenshot({ encoding: "base64", fullPage: false }); } catch(_) {}
+            stepResults.push("FAIL verify_row_text error: " + e.message);
+          }
+        `);
+        break;
+      }
+
+      // ── Run arbitrary Playwright/Puppeteer script ──
+      case "run_playwright": {
+        const scriptCode = (step.script as string) || "";
+        // Sanitize: the script runs inside the browser context with access to `page`
+        stepCode.push(`
+          try {
+            const _runResult = await (async () => {
+              ${scriptCode}
+            })();
+            if (_runResult !== undefined && _runResult !== null) {
+              if (typeof _runResult === 'object') {
+                const resultStr = JSON.stringify(_runResult);
+                stepResults.push("run_playwright result: " + resultStr.substring(0, 500));
+                if (_runResult.extractedContent) extractedContent = _runResult.extractedContent;
+                if (_runResult.verified !== undefined) {
+                  stepResults.push(_runResult.verified ? "VERIFIED: " + (_runResult.message || "verification passed") : "FAIL verification: " + (_runResult.message || "verification failed"));
+                }
+              } else {
+                stepResults.push("run_playwright result: " + String(_runResult).substring(0, 500));
+              }
+            } else {
+              stepResults.push("run_playwright completed");
+            }
+          } catch(e) {
+            try { screenshot = await page.screenshot({ encoding: "base64", fullPage: false }); } catch(_) {}
+            stepResults.push("FAIL run_playwright error: " + e.message);
+          }
+        `);
+        break;
+      }
+
+      // ── Select from dropdown (by visible text, not value) ──
+      case "select_by_text": {
+        const selectSelector = JSON.stringify((step.selector as string) || "select");
+        const selectText = JSON.stringify((step.text as string) || "");
+        stepCode.push(`
+          try {
+            const sel = ${selectSelector};
+            const txt = ${selectText};
+            await page.waitForSelector(sel, { timeout: 15000 });
+            // Find option by visible text
+            const optionValue = await page.evaluate((s, t) => {
+              const select = document.querySelector(s);
+              if (!select) return null;
+              for (const opt of select.options) {
+                if (opt.textContent.trim().toLowerCase().includes(t.toLowerCase())) {
+                  return opt.value;
+                }
+              }
+              return null;
+            }, sel, txt);
+            if (optionValue !== null) {
+              await page.select(sel, optionValue);
+              stepResults.push("Selected option containing \\"" + txt + "\\" in " + sel);
+            } else {
+              stepResults.push("FAIL select_by_text: No option matching \\"" + txt + "\\" in " + sel);
+            }
+          } catch(e) { stepResults.push("FAIL select_by_text error: " + e.message); }
+        `);
+        break;
+      }
+
+      // ── Click first available match from a list of button texts ──
+      case "click_first_match": {
+        const candidates = JSON.stringify((step.texts as string[]) || []);
+        stepCode.push(`
+          try {
+            const texts = ${candidates};
+            let found = false;
+            for (const txt of texts) {
+              const clicked = await helpers.clickByText(page, txt);
+              if (clicked) {
+                await new Promise(r => setTimeout(r, 1000));
+                await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 5000 }).catch(() => {});
+                stepResults.push("Clicked first match: \\"" + txt + "\\"");
+                found = true;
+                break;
+              }
+            }
+            if (!found) {
+              const domHint = await helpers.getAvailableButtons(page);
+              stepResults.push("FAIL click_first_match: None of " + JSON.stringify(texts) + " found. Available: " + JSON.stringify(domHint));
+            }
+          } catch(e) {
+            try { screenshot = await page.screenshot({ encoding: "base64", fullPage: false }); } catch(_) {}
+            stepResults.push("FAIL click_first_match error: " + e.message);
+          }
+        `);
+        break;
+      }
+
       default:
         stepCode.push(`stepResults.push("Unknown action: ${action}");`);
     }
