@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import {
   Wrench, Clock, CheckCircle2, XCircle, Loader2, AlertTriangle,
-  ChevronDown, ChevronUp, Play, Save, Calendar
+  ChevronDown, ChevronUp, Play, Save, Calendar, Camera, Hand, RefreshCw
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
@@ -36,6 +36,8 @@ interface ToolApproval {
 interface Props {
   toolRun: ToolRun;
   conversationId: string;
+  onTakeOver?: () => void;
+  onResume?: () => void;
 }
 
 const statusConfig: Record<string, { icon: React.ElementType; color: string; label: string }> = {
@@ -67,7 +69,7 @@ const stepStatusIcon: Record<string, React.ReactNode> = {
   queued: <Clock className="w-3 h-3 text-muted-foreground" />,
 };
 
-export function ToolCard({ toolRun, conversationId }: Props) {
+export function ToolCard({ toolRun, conversationId, onTakeOver, onResume }: Props) {
   const { user } = useAuth();
   const { toast } = useToast();
   const [toolName, setToolName] = useState<string>("");
@@ -232,6 +234,59 @@ export function ToolCard({ toolRun, conversationId }: Props) {
               )}
             </div>
           </div>
+        )}
+
+        {/* Screenshot display for browser_do results */}
+        {isBrowserDo && output && (
+          (() => {
+            const screenshotUrl = (output as any).screenshot_url as string | null;
+            const screenshotBase64 = (output as any).screenshot as string | null;
+            const imgSrc = screenshotUrl || (screenshotBase64 && screenshotBase64.length > 100 ? `data:image/png;base64,${screenshotBase64}` : null);
+            const hasFailed = (output as any).has_failures === true || toolRun.status === "failed";
+            if (!imgSrc && !hasFailed) return null;
+            return (
+              <div className="border-t border-border/50 px-4 py-2.5 space-y-2">
+                {imgSrc && (
+                  <div>
+                    <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1 flex items-center gap-1">
+                      <Camera className="w-3 h-3" />
+                      {hasFailed ? "Error Screenshot" : "Proof Screenshot"}
+                    </p>
+                    <img
+                      src={imgSrc}
+                      alt={hasFailed ? "Error state screenshot" : "Task completion proof"}
+                      className={cn(
+                        "w-full max-h-64 object-contain rounded-xl border",
+                        hasFailed ? "border-destructive/30" : "border-border/50"
+                      )}
+                    />
+                  </div>
+                )}
+                {/* Take Over / Resume buttons for failed runs */}
+                {hasFailed && (
+                  <div className="flex items-center gap-2 pt-1">
+                    {(output as any).last_url && (
+                      <span className="text-[10px] text-muted-foreground truncate flex-1">
+                        Last checkpoint: {(output as any).last_url}
+                      </span>
+                    )}
+                    {onTakeOver && (
+                      <Button size="sm" variant="outline" onClick={onTakeOver}
+                        className="h-7 text-xs gap-1 rounded-xl border-amber-500/30 text-amber-500 hover:bg-amber-500/10">
+                        <Hand className="w-3 h-3" /> Take Over
+                      </Button>
+                    )}
+                    {onResume && (
+                      <Button size="sm" variant="outline" onClick={onResume}
+                        className="h-7 text-xs gap-1 rounded-xl border-primary/30 text-primary hover:bg-primary/10">
+                        <RefreshCw className="w-3 h-3" /> Resume
+                      </Button>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })()
         )}
 
         {expanded && (

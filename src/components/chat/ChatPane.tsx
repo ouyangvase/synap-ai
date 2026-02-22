@@ -155,11 +155,19 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
         latestUrl = output.url as string;
       }
 
-      if (output.screenshot && typeof output.screenshot === "string") {
+      // Prefer screenshot_url (Supabase Storage URL) over base64
+      if (output.screenshot_url && typeof output.screenshot_url === "string") {
+        newScreenshots.push({
+          data: output.screenshot_url as string,
+          url: (output.url as string) || "",
+          title: (output.title as string) || "",
+          time: run.completed_at || run.created_at,
+        });
+      } else if (output.screenshot && typeof output.screenshot === "string") {
         const screenshotData = output.screenshot as string;
         if (screenshotData.length > 100) {
           newScreenshots.push({
-            data: screenshotData,
+            data: `data:image/png;base64,${screenshotData}`,
             url: (output.url as string) || "",
             title: (output.title as string) || "",
             time: run.completed_at || run.created_at,
@@ -470,6 +478,8 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
                 key={item.data.id}
                 toolRun={item.data as ToolRun}
                 conversationId={conversationId}
+                onTakeOver={handleTakeOver}
+                onResume={handleResume}
               />
             );
           }
@@ -563,7 +573,7 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
             {/* Show latest screenshot large */}
             <div className="relative">
               <img
-                src={`data:image/png;base64,${latestScreenshot}`}
+                src={latestScreenshot?.startsWith("data:") || latestScreenshot?.startsWith("http") ? latestScreenshot : `data:image/png;base64,${latestScreenshot}`}
                 alt="Browser screenshot"
                 className="max-w-full rounded-xl border border-border elevation-1"
               />
@@ -586,7 +596,7 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
                       className="group relative"
                     >
                       <img
-                        src={`data:image/png;base64,${s.data}`}
+                        src={s.data.startsWith("data:") || s.data.startsWith("http") ? s.data : `data:image/png;base64,${s.data}`}
                         alt={`Screenshot ${screenshots.length - 1 - i}`}
                         className="w-24 h-16 object-cover rounded-lg border border-border opacity-70 group-hover:opacity-100 transition-opacity"
                       />

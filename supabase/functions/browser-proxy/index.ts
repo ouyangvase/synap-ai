@@ -626,6 +626,45 @@ Deno.serve(async (req) => {
     }
   }
 
+  // ── Screenshot upload helper ──
+  // Uploads base64 screenshot to Supabase Storage and returns public URL
+  async function uploadScreenshot(
+    base64Data: string,
+    conversationId: string,
+    stepIndex: number,
+    label: string = "final",
+  ): Promise<string | null> {
+    if (!base64Data || base64Data.length < 100) return null;
+    try {
+      const supa = createClient(supabaseUrl, supabaseServiceKey);
+      // Decode base64 to binary
+      const binaryString = atob(base64Data);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      const timestamp = Date.now();
+      const filePath = `${conversationId || "unknown"}/${timestamp}-${label}-step${stepIndex}.png`;
+      const { error } = await supa.storage
+        .from("browser-screenshots")
+        .upload(filePath, bytes, {
+          contentType: "image/png",
+          upsert: false,
+        });
+      if (error) {
+        console.error("[uploadScreenshot] Upload error:", error.message);
+        return null;
+      }
+      const { data: publicUrlData } = supa.storage
+        .from("browser-screenshots")
+        .getPublicUrl(filePath);
+      return publicUrlData?.publicUrl || null;
+    } catch (err) {
+      console.error("[uploadScreenshot] Exception:", err);
+      return null;
+    }
+  }
+
   // ──────────────────────────────────────────────
   // POST /agent-action — Unified endpoint for AI agent browser tool calls.
   // Called by the chat edge function (service-to-service), no user auth needed.
@@ -740,8 +779,8 @@ Deno.serve(async (req) => {
         const script = buildCompositeScript(url, steps);
 
         // ── Part B: Watchdog timeout ──
-        // Total timeout scales with step count (30s base + 12s per step, max 180s)
-        const watchdogTimeout = Math.min(30_000 + steps.length * 12_000, 180_000);
+        // Total timeout scales with step count (60s base + 15s per step, max 300s)
+        const watchdogTimeout = Math.min(60_000 + steps.length * 15_000, 300_000);
 
         const resp = await fetchWithTimeout(
           `${bl.baseUrl}/function?token=${bl.token}`,
@@ -786,22 +825,35 @@ Deno.serve(async (req) => {
               const screenshot2 = (result2.screenshot as string) || null;
               const stepResults2 = (result2.step_results as string[]) || [];
               const failedSteps2 = stepResults2.filter((s: string) => s.startsWith("FAIL"));
-              let markdown2 = `# ${pageTitle2 || pageUrl2}\n\nFinal URL: ${pageUrl2}\n`;
-              if (failedSteps2.length > 0) {
-                markdown2 += `\n## Steps Failed (${failedSteps2.length})\n`;
+              const hasFailures2 = failedSteps2.length > 0;
+
+              // Upload screenshot to Storage
+              let screenshotUrl2: string | null = null;
+              if (screenshot2) {
+                screenshotUrl2 = await uploadScreenshot(screenshot2, conversationId, stepResults2.length, hasFailures2 ? "error" : "final");
+              }
+
+              let markdown2 = "";
+              if (hasFailures2) {
+                markdown2 = `# TASK FAILED (after retry)\n\nFinal URL: ${pageUrl2}\n\n## Steps Failed (${failedSteps2.length})\n`;
                 failedSteps2.forEach((s: string, i: number) => { markdown2 += `${i + 1}. ${s}\n`; });
+              } else if (screenshotUrl2) {
+                markdown2 = `# Task Completed Successfully (after retry)\n\n**${pageTitle2 || pageUrl2}**\nFinal URL: ${pageUrl2}\n\nScreenshot proof: ${screenshotUrl2}\n`;
+              } else {
+                markdown2 = `# ${pageTitle2 || pageUrl2}\n\nFinal URL: ${pageUrl2}\n\n*Task completed but no visual proof screenshot was captured.*\n`;
               }
               if (stepResults2.length > 0) {
                 markdown2 += `\nAll steps:\n${stepResults2.map((s: string, i: number) => `${i + 1}. ${s}`).join("\n")}\n`;
               }
               if (extractedContent2) markdown2 += `\nPage content:\n${extractedContent2.substring(0, 8000)}`;
               return jsonResp({
-                success: true,
+                success: !hasFailures2,
                 has_failures: failedSteps2.length > 0,
                 failed_step_count: failedSteps2.length,
                 title: pageTitle2, url: pageUrl2,
                 content: extractedContent2.substring(0, 8000),
                 screenshot: screenshot2 ? screenshot2.substring(0, 100000) : null,
+                screenshot_url: screenshotUrl2,
                 step_results: stepResults2,
                 markdown_content: markdown2,
                 retried: true,
@@ -883,19 +935,49 @@ Deno.serve(async (req) => {
           };
         });
 
-        let markdown = `# ${pageTitle || pageUrl}\n\nFinal URL: ${pageUrl}\n`;
-
         // Detect failures in step results
         const failedSteps = rawStepResults.filter((s: string) => s.startsWith("FAIL"));
         const hasFailures = failedSteps.length > 0;
 
+        // ── Upload screenshot to Supabase Storage ──
+        let screenshotUrl: string | null = null;
+        if (screenshot) {
+          screenshotUrl = await uploadScreenshot(
+            screenshot,
+            conversationId,
+            structuredSteps.length,
+            hasFailures ? "error" : "final",
+          );
+        }
+
+        // ── Proof-gated markdown_content ──
+        // The markdown MUST accurately reflect success/failure state.
+        // The LLM uses this to form its response — false claims here = false claims to user.
+        let markdown = "";
+
         if (hasFailures) {
-          markdown += `\n## Steps Failed (${failedSteps.length})\n`;
+          const firstFailed = structuredSteps.find(s => s.status === "failed");
+          const failedAt = firstFailed ? `step ${firstFailed.step} (${firstFailed.action})` : "unknown step";
+          const failedError = firstFailed?.error || "unknown error";
+          markdown += `# TASK FAILED at ${failedAt}\n\n`;
+          markdown += `**Error:** ${failedError}\n\n`;
+          markdown += `Final URL: ${pageUrl}\n\n`;
+          markdown += `## Steps Failed (${failedSteps.length})\n`;
           markdown += `The following steps failed. Use the DOM hints (AVAILABLE_INPUTS / AVAILABLE_BUTTONS) to construct corrected actions:\n\n`;
           failedSteps.forEach((s: string, i: number) => {
             markdown += `${i + 1}. ${s}\n`;
           });
           markdown += `\n**DO NOT ask the user for selectors.** Use the available elements listed above to retry with corrected parameters.\n`;
+          if (screenshotUrl) {
+            markdown += `\nError screenshot: ${screenshotUrl}\n`;
+          }
+        } else if (screenshotUrl) {
+          markdown += `# Task Completed Successfully\n\n`;
+          markdown += `**${pageTitle || pageUrl}**\n\nFinal URL: ${pageUrl}\n\n`;
+          markdown += `Screenshot proof: ${screenshotUrl}\n`;
+        } else {
+          markdown += `# ${pageTitle || pageUrl}\n\nFinal URL: ${pageUrl}\n`;
+          markdown += `\n*Task completed but no visual proof screenshot was captured.*\n`;
         }
 
         if (rawStepResults.length > 0) {
@@ -905,17 +987,34 @@ Deno.serve(async (req) => {
           markdown += `\nPage content:\n${extractedContent.substring(0, 8000)}`;
         }
 
+        // ── Build checkpoint data ──
+        const checkpoints: Array<{ step_index: number; url: string; step_name: string }> = [];
+        for (const sr of structuredSteps) {
+          if (sr.status === "success" && (sr.action === "navigate" || sr.action === "login" || sr.url)) {
+            checkpoints.push({
+              step_index: sr.step,
+              url: sr.url || pageUrl,
+              step_name: sr.action,
+            });
+          }
+        }
+
         return jsonResp({
-          success: true,
+          success: !hasFailures,
           has_failures: hasFailures,
           failed_step_count: failedSteps.length,
           title: pageTitle,
           url: pageUrl,
           content: extractedContent.substring(0, 8000),
           screenshot: screenshot ? screenshot.substring(0, 100000) : null,
+          screenshot_url: screenshotUrl,
           step_results: structuredSteps,
           raw_step_results: rawStepResults,
           markdown_content: markdown,
+          checkpoints,
+          last_step_index: structuredSteps.length,
+          last_step_name: structuredSteps.length > 0 ? structuredSteps[structuredSteps.length - 1].action : null,
+          last_url: pageUrl,
         });
       }
 
@@ -2027,28 +2126,52 @@ function buildCompositeScript(
 
       case "navigate":
         stepCode.push(`
-          await page.goto(${url}, { waitUntil: "domcontentloaded", timeout: 20000 });
-          await new Promise(r => setTimeout(r, 1000));
-          stepResults.push("Navigated to " + ${url});
+          for (let _navR = 0; _navR < 2; _navR++) {
+            try {
+              await page.goto(${url}, { waitUntil: "domcontentloaded", timeout: 90000 });
+              await new Promise(r => setTimeout(r, 1000));
+              stepResults.push("Navigated to " + ${url});
+              break;
+            } catch(_navE) {
+              if (_navR === 0) {
+                stepResults.push("WARNING: Navigation retry for " + ${url});
+                await new Promise(r => setTimeout(r, 2000));
+              } else {
+                try { screenshot = await page.screenshot({ encoding: "base64", fullPage: false }); } catch(_) {}
+                stepResults.push("FAIL navigate [" + ${url} + "] " + _navE.message);
+              }
+            }
+          }
         `);
         break;
 
       case "click":
         stepCode.push(`
-          try {
-            await page.waitForSelector(${selector}, { timeout: 8000 });
-            await page.click(${selector});
-            await new Promise(r => setTimeout(r, 800));
-            await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 5000 }).catch(() => {});
-            stepResults.push("Clicked " + ${selector});
-          } catch(e) { stepResults.push("Click failed on " + ${selector} + ": " + e.message); }
+          for (let _clkR = 0; _clkR < 2; _clkR++) {
+            try {
+              await page.waitForSelector(${selector}, { timeout: 15000 });
+              await page.click(${selector});
+              await new Promise(r => setTimeout(r, 800));
+              await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 5000 }).catch(() => {});
+              stepResults.push("Clicked " + ${selector});
+              break;
+            } catch(e) {
+              if (_clkR === 0) {
+                stepResults.push("WARNING: Click retry on " + ${selector});
+                await new Promise(r => setTimeout(r, 2000));
+              } else {
+                try { screenshot = await page.screenshot({ encoding: "base64", fullPage: false }); } catch(_) {}
+                stepResults.push("FAIL click " + ${selector} + ": " + e.message);
+              }
+            }
+          }
         `);
         break;
 
       case "type":
         stepCode.push(`
           try {
-            await page.waitForSelector(${selector}, { timeout: 10000 });
+            await page.waitForSelector(${selector}, { timeout: 15000 });
             ${step.clear ? `await page.click(${selector}, { clickCount: 3 }); await page.keyboard.press("Backspace");` : ""}
             await page.type(${selector}, ${text}, { delay: 50 });
             stepResults.push("Typed into " + ${selector});
@@ -2059,7 +2182,7 @@ function buildCompositeScript(
       case "select":
         stepCode.push(`
           try {
-            await page.waitForSelector(${selector}, { timeout: 10000 });
+            await page.waitForSelector(${selector}, { timeout: 15000 });
             await page.select(${selector}, ${value});
             stepResults.push("Selected " + ${value} + " in " + ${selector});
           } catch(e) { stepResults.push("Select failed: " + e.message); }
@@ -2101,7 +2224,7 @@ function buildCompositeScript(
       case "extract":
         stepCode.push(`
           try {
-            await page.waitForSelector(${selector}, { timeout: 10000 }).catch(() => {});
+            await page.waitForSelector(${selector}, { timeout: 15000 }).catch(() => {});
             const extracted = await page.evaluate((sel) => {
               const el = document.querySelector(sel);
               return el ? el.innerText : null;
@@ -2115,7 +2238,7 @@ function buildCompositeScript(
       case "get_html":
         stepCode.push(`
           try {
-            await page.waitForSelector(${selector}, { timeout: 10000 }).catch(() => {});
+            await page.waitForSelector(${selector}, { timeout: 15000 }).catch(() => {});
             const html = await page.evaluate((sel, limit) => {
               const el = document.querySelector(sel);
               if (!el) return "(element not found)";
@@ -2484,6 +2607,7 @@ function buildCompositeScript(
     const stepResults = [];
     let extractedContent = "";
     let takeScreenshot = false;
+    let screenshot = null; // Moved up so it's accessible from navigation retry
 
     // ── Part B: Per-step timeout wrapper ──
     async function withStepTimeout(fn, timeoutMs, stepName) {
@@ -2506,7 +2630,7 @@ function buildCompositeScript(
 
     // ── Part B: Stuck page watchdog ──
     let lastStepTime = Date.now();
-    const STUCK_THRESHOLD = 25000; // 25s per step max
+    const STUCK_THRESHOLD = 40000; // 40s per step max (increased for slow sites)
 
     function markStepProgress() { lastStepTime = Date.now(); }
 
@@ -2533,14 +2657,28 @@ function buildCompositeScript(
       } catch(e) { /* page check non-fatal */ }
     }
 
-    // Navigate to start URL (use domcontentloaded instead of networkidle2 for speed)
+    // Navigate to start URL with retry (90s timeout, 1 retry)
     ${startUrl ? `
-    await page.goto(${JSON.stringify(startUrl)}, { waitUntil: "domcontentloaded", timeout: 20000 });
-    await new Promise(r => setTimeout(r, 1500)); // brief settle
-    stepResults.push("Navigated to " + ${JSON.stringify(startUrl)});
+    for (let _navRetry = 0; _navRetry < 2; _navRetry++) {
+      try {
+        await page.goto(${JSON.stringify(startUrl)}, { waitUntil: "domcontentloaded", timeout: 90000 });
+        await new Promise(r => setTimeout(r, 1500)); // brief settle
+        stepResults.push("Navigated to " + ${JSON.stringify(startUrl)});
+        break;
+      } catch(_navErr) {
+        if (_navRetry === 0) {
+          stepResults.push("WARNING: Navigation retry after: " + _navErr.message);
+          await new Promise(r => setTimeout(r, 2000));
+        } else {
+          stepResults.push("FAIL navigate [${startUrl}] " + _navErr.message);
+          // Take error screenshot before giving up
+          try { screenshot = await page.screenshot({ encoding: "base64", fullPage: false }); } catch(_) {}
+        }
+      }
+    }
     ` : ""}
 
-    // Execute steps with per-step timeout protection
+    // Execute steps with per-step timeout protection + error screenshots
     ${stepCode.map((code, i) => `
     markStepProgress();
     await (async () => {
@@ -2549,6 +2687,10 @@ function buildCompositeScript(
       }, STUCK_THRESHOLD);
       try {
         ${code}
+      } catch(_stepErr) {
+        // Capture error screenshot before recording failure
+        try { screenshot = await page.screenshot({ encoding: "base64", fullPage: false }); } catch(_) {}
+        stepResults.push("FAIL step_${i + 1} error: " + _stepErr.message);
       } finally {
         clearTimeout(_stepTimer);
       }
@@ -2569,11 +2711,12 @@ function buildCompositeScript(
       } catch {}
     }
 
-    // Always take a final screenshot for visual feedback
-    let screenshot = null;
+    // Always take a final screenshot (overwrite any earlier error screenshot with latest state)
     try {
       screenshot = await page.screenshot({ encoding: "base64", fullPage: false });
-    } catch {}
+    } catch {
+      // If this fails, keep any earlier error screenshot we captured
+    }
 
     const title = await page.title();
     const finalUrl = page.url();
@@ -2678,7 +2821,7 @@ function buildActionScript(
         // Reconnect: navigate to last known URL first
         await page.goto(${JSON.stringify(currentUrl)}, {
           waitUntil: "domcontentloaded",
-          timeout: 20000,
+          timeout: 90000,
         }).catch(() => {});
     `;
   };
@@ -2687,7 +2830,7 @@ function buildActionScript(
     case "navigate":
       return `export default async function ({ page }) {
         const targetUrl = ${JSON.stringify(params.url || "about:blank")};
-        await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
+        await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 90000 });
         const title = await page.title();
         const finalUrl = page.url();
         return {
