@@ -268,8 +268,20 @@ serve(async (req) => {
             let currentToolCalls = toolCallsList;
             let currentContent = fullContent;
             const MAX_LOOPS = 16;
+            const loopStartTime = Date.now();
+            // Edge functions have a hard wall-clock limit (~60s free, ~150s pro).
+            // Reserve 10s for overhead. Stop starting new iterations after this.
+            const MAX_LOOP_ELAPSED_MS = 50_000; // 50s safety limit
 
             for (let loop = 0; loop < MAX_LOOPS; loop++) {
+              // ── Wall-clock guard ──
+              const elapsed = Date.now() - loopStartTime;
+              if (elapsed > MAX_LOOP_ELAPSED_MS) {
+                console.warn(`[agentic-loop] Wall-clock limit reached (${elapsed}ms). Stopping loop to prevent edge fn timeout.`);
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "\n\n*Continuing in next message — processing time limit reached. Send any message to continue.*" } }] })}\n\n`));
+                break;
+              }
+
               const toolResultMsgs: any[] = [];
               let approvalPending = false;
 
@@ -312,16 +324,30 @@ serve(async (req) => {
                     .single();
 
                   if (completedRun) {
-                    let resultContent: string;
+                    let rc = completedRun.output?.markdown_content || JSON.stringify(completedRun.output || {});
+                    if (typeof rc !== "string") rc = JSON.stringify(rc);
+
+                    // Pass error information to the LLM if tool failed so it can debug and retry
                     if (completedRun.status === "failed") {
-                      // CRITICAL: Pass error information to the LLM so it can debug and retry
-                      resultContent = `ERROR: Tool "${tool.name}" failed.\nError: ${completedRun.error || "Unknown error"}\nPlease analyze the error and try a different approach.`;
-                    } else {
-                      resultContent = completedRun.output?.markdown_content || JSON.stringify(completedRun.output || {});
+                      rc = `ERROR: Tool "${tool.name}" failed.\nError: ${completedRun.error || "Unknown error"}\nPlease analyze the error and try a different approach.`;
                     }
+
+                    // Recovery mode — nudge LLM to retry on verification failure
+                    const outcomeStatus = completedRun.output?.outcome_status;
+                    const verificationStatus = completedRun.output?.verification_status;
+                    if (tool.name === "browser_do" && (outcomeStatus === "needs_attention" || verificationStatus === "verification_failed")) {
+                      rc += "\n\n⚠️ VERIFICATION FAILED — The action may not have completed successfully. " +
+                        "You MUST retry with a corrected approach. Common issues:\n" +
+                        "- A confirmation dialog/modal may need to be clicked\n" +
+                        "- The button click may not have registered (try click_in_row instead of click_by_text)\n" +
+                        "- A dropdown/select may need to be chosen before clicking Assign\n" +
+                        "- There may be a required field that wasn't filled\n" +
+                        "DO NOT report this task as complete. Issue a new browser_do call to fix and verify.";
+                    }
+
                     toolResultMsgs.push({
                       role: "tool",
-                      content: (typeof resultContent === "string" ? resultContent : JSON.stringify(resultContent)).substring(0, 15000),
+                      content: rc.substring(0, 15000),
                       tool_call_id: completedRun.tool_call_id,
                     });
                   }
@@ -341,6 +367,9 @@ serve(async (req) => {
 
               const followUpBody: any = { model, messages: loopMessages, stream: true };
               if (llmTools.length > 0) followUpBody.tools = llmTools;
+
+              // ── Emit "thinking" event so UI shows the agent is reasoning ──
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "thinking", message: "Analyzing results and planning next step..." })}\n\n`));
 
               const followUpResp = await fetchWithRetry(
                 "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
@@ -493,13 +522,12 @@ async function executeToolRun(
       input,
     };
 
-    // Dynamic timeout: browser_do needs much more time for multi-step flows
+    // Dynamic timeout: browser_do needs time for multi-step flows but must fit in edge fn limit
     const isBrowserDo = tool.name === "browser_do";
     const stepCount = isBrowserDo && Array.isArray(input.steps) ? input.steps.length : 0;
-    // browser_do: 30s base + 15s per step, min 90s, max 240s
-    // other tools: use endpoint config
+    // browser_do: 20s base + 10s per step, min 50s, max 90s (edge fn has ~60-150s limit)
     const effectiveTimeout = isBrowserDo
-      ? Math.min(Math.max(30_000 + stepCount * 15_000, 90_000), 240_000)
+      ? Math.min(Math.max(20_000 + stepCount * 10_000, 50_000), 90_000)
       : ep.timeout_ms;
 
     let lastError = "";
@@ -535,8 +563,18 @@ async function executeToolRun(
         }
 
         const result = await resp.json();
+
+        // ── Proof-gated completion: browser_do status reflects outcome ──
+        let runStatus = "completed";
+        if (isBrowserDo && result.outcome_status === "needs_attention") {
+          runStatus = "failed"; // Mark as failed so UI shows failure correctly
+        }
+        if (isBrowserDo && result.has_failures && !result.verification_status) {
+          runStatus = "failed";
+        }
+
         await supabase.from("tool_runs").update({
-          status: "completed", output: result, completed_at: new Date().toISOString(),
+          status: runStatus, output: result, completed_at: new Date().toISOString(),
         }).eq("id", toolRunId);
 
         const resultContent = result.markdown_content || JSON.stringify(result);

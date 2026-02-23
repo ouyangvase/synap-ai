@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   Send, Bot, Plus, Monitor, X, Image as ImageIcon, Globe,
-  Hand, Play, Loader2, RefreshCw
+  Hand, Play, Loader2, RefreshCw, Brain
 } from "lucide-react";
 import { ToolCard } from "./ToolCard";
 import { MessageBubble } from "./MessageBubble";
@@ -54,6 +54,7 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
   const [browserUrl, setBrowserUrl] = useState<string | null>(null);
   const [takeOverMode, setTakeOverMode] = useState(false);
   const [livePolling, setLivePolling] = useState(false);
+  const [thinkingMessage, setThinkingMessage] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -156,19 +157,22 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
       }
 
       // Prefer screenshot_url (Supabase Storage URL) over base64
+      // Support data: prefix for screenshot data
       if (output.screenshot_url && typeof output.screenshot_url === "string") {
         newScreenshots.push({
           data: output.screenshot_url as string,
-          url: (output.url as string) || "",
+          url: (output.url as string) || (output.last_url as string) || "",
           title: (output.title as string) || "",
           time: run.completed_at || run.created_at,
         });
       } else if (output.screenshot && typeof output.screenshot === "string") {
         const screenshotData = output.screenshot as string;
         if (screenshotData.length > 100) {
+          // Add data: prefix if not present
+          const dataWithPrefix = screenshotData.startsWith("data:") ? screenshotData : `data:image/png;base64,${screenshotData}`;
           newScreenshots.push({
-            data: `data:image/png;base64,${screenshotData}`,
-            url: (output.url as string) || "",
+            data: dataWithPrefix,
+            url: (output.url as string) || (output.last_url as string) || "",
             title: (output.title as string) || "",
             time: run.completed_at || run.created_at,
           });
@@ -240,11 +244,17 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
             try {
               const parsed = JSON.parse(jsonStr);
               if (parsed.type === "tool_call" || parsed.type === "approval_required" || parsed.type === "tool_result") {
+                setThinkingMessage(null);
                 await fetchToolRuns();
+                continue;
+              }
+              if (parsed.type === "thinking") {
+                setThinkingMessage(parsed.message || "Thinking...");
                 continue;
               }
               const content = parsed.choices?.[0]?.delta?.content;
               if (content) {
+                setThinkingMessage(null);
                 assistantSoFar += content;
                 setStreamingContent(assistantSoFar);
               }
@@ -262,6 +272,7 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
     } finally {
       setIsStreaming(false);
       setStreamingContent("");
+      setThinkingMessage(null);
     }
   };
 
@@ -328,19 +339,27 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
             const parsed = JSON.parse(jsonStr);
             // Check for tool_call events
             if (parsed.type === "tool_call") {
+              setThinkingMessage(null);
               await fetchToolRuns();
               continue;
             }
             if (parsed.type === "approval_required") {
+              setThinkingMessage(null);
               await fetchToolRuns();
               continue;
             }
             if (parsed.type === "tool_result") {
+              setThinkingMessage(null);
               await fetchToolRuns();
+              continue;
+            }
+            if (parsed.type === "thinking") {
+              setThinkingMessage(parsed.message || "Thinking...");
               continue;
             }
             const content = parsed.choices?.[0]?.delta?.content;
             if (content) {
+              setThinkingMessage(null);
               assistantSoFar += content;
               setStreamingContent(assistantSoFar);
             }
@@ -359,6 +378,7 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
     } finally {
       setIsStreaming(false);
       setStreamingContent("");
+      setThinkingMessage(null);
     }
   };
 
@@ -504,12 +524,29 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
 
         {isStreaming && !streamingContent && (
           <div className="flex items-center gap-2 px-4 py-3">
-            <div className="flex gap-1">
-              <span className="w-1.5 h-1.5 bg-primary rounded-full animate-pulse-dot" />
-              <span className="w-1.5 h-1.5 bg-primary rounded-full animate-pulse-dot [animation-delay:0.3s]" />
-              <span className="w-1.5 h-1.5 bg-primary rounded-full animate-pulse-dot [animation-delay:0.6s]" />
-            </div>
-            <span className="text-xs text-muted-foreground">Thinking…</span>
+            {thinkingMessage ? (
+              <>
+                <Brain className="w-4 h-4 text-primary animate-pulse" />
+                <span className="text-xs text-muted-foreground">{thinkingMessage}</span>
+              </>
+            ) : (
+              <>
+                <div className="flex gap-1">
+                  <span className="w-1.5 h-1.5 bg-primary rounded-full animate-pulse-dot" />
+                  <span className="w-1.5 h-1.5 bg-primary rounded-full animate-pulse-dot [animation-delay:0.3s]" />
+                  <span className="w-1.5 h-1.5 bg-primary rounded-full animate-pulse-dot [animation-delay:0.6s]" />
+                </div>
+                <span className="text-xs text-muted-foreground">Thinking…</span>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* Show thinking message even when streaming content exists */}
+        {isStreaming && streamingContent && thinkingMessage && (
+          <div className="flex items-center gap-2 px-4 py-2">
+            <Brain className="w-3.5 h-3.5 text-primary animate-pulse" />
+            <span className="text-[11px] text-muted-foreground">{thinkingMessage}</span>
           </div>
         )}
 

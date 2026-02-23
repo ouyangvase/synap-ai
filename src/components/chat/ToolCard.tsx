@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import {
   Wrench, Clock, CheckCircle2, XCircle, Loader2, AlertTriangle,
-  ChevronDown, ChevronUp, Play, Save, Calendar, Camera, Hand, RefreshCw
+  ChevronDown, ChevronUp, Play, Save, Calendar, Camera, Hand, RefreshCw, Eye
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
@@ -172,6 +172,18 @@ export function ToolCard({ toolRun, conversationId, onTakeOver, onResume }: Prop
   const isBrowserDo = toolName === "browser_do";
   const isCompleted = toolRun.status === "completed";
 
+  // Extract screenshot URL, verification status, checkpoint info
+  const screenshotUrl = (output?.screenshot_url as string) || null;
+  const screenshotBase64 = (output?.screenshot as string) || null;
+  const verificationStatus = (output?.verification_status as string) || null;
+  const outcomeStatus = (output?.outcome_status as string) || null;
+  const lastUrl = (output?.last_url as string) || (output?.url as string) || null;
+  const lastStepIndex = (output?.last_step_index as number) ?? null;
+  const lastStepName = (output?.last_step_name as string) || null;
+  const errorMessage = (output?.error_message as string) || toolRun.error || null;
+  const hasFailed = toolRun.status === "failed" || outcomeStatus === "needs_attention";
+  const isVerified = verificationStatus === "verified";
+
   return (
     <div className="max-w-3xl mx-auto px-2 py-2">
       <div className="glass rounded-2xl overflow-hidden elevation-1">
@@ -191,6 +203,9 @@ export function ToolCard({ toolRun, conversationId, onTakeOver, onResume }: Prop
               <span className="text-[10px] text-muted-foreground">
                 {stepResults.filter(s => s.status === "success").length}/{stepResults.length} steps
               </span>
+            )}
+            {isBrowserDo && lastUrl && (
+              <span className="text-[10px] text-muted-foreground truncate max-w-[150px]">{lastUrl}</span>
             )}
           </div>
           <div className="flex items-center gap-2">
@@ -306,16 +321,37 @@ export function ToolCard({ toolRun, conversationId, onTakeOver, onResume }: Prop
           </div>
         )}
 
-        {/* Screenshot display for browser_do results */}
+        {/* Screenshot + Verification + Checkpoint (for browser_do) */}
         {isBrowserDo && output && (
           (() => {
             const screenshotUrl = (output as any).screenshot_url as string | null;
             const screenshotBase64 = (output as any).screenshot as string | null;
             const imgSrc = screenshotUrl || (screenshotBase64 && screenshotBase64.length > 100 ? `data:image/png;base64,${screenshotBase64}` : null);
-            const hasFailed = (output as any).has_failures === true || toolRun.status === "failed";
-            if (!imgSrc && !hasFailed) return null;
+            const hasFailed = (output as any).has_failures === true || toolRun.status === "failed" || (output as any).outcome_status === "needs_attention";
+            const verificationStatus = (output as any).verification_status as string | null;
+            const isVerified = verificationStatus === "verified";
+            const lastUrl = (output as any).last_url as string | null;
+
+            if (!imgSrc && !hasFailed && !verificationStatus) return null;
+
             return (
               <div className="border-t border-border/50 px-4 py-2.5 space-y-2">
+                {/* Verification badge */}
+                {verificationStatus && verificationStatus !== "no_verification" && (
+                  <div className="flex items-center gap-2">
+                    {isVerified ? (
+                      <Badge variant="outline" className="text-[10px] text-emerald-500 border-emerald-500/30 gap-1">
+                        <CheckCircle2 className="w-3 h-3" /> Verified
+                      </Badge>
+                    ) : (
+                      <Badge variant="outline" className="text-[10px] text-destructive border-destructive/30 gap-1">
+                        <XCircle className="w-3 h-3" /> Verification Failed
+                      </Badge>
+                    )}
+                  </div>
+                )}
+
+                {/* Proof / Error Screenshot */}
                 {imgSrc && (
                   <div>
                     <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1 flex items-center gap-1">
@@ -326,29 +362,31 @@ export function ToolCard({ toolRun, conversationId, onTakeOver, onResume }: Prop
                       src={imgSrc}
                       alt={hasFailed ? "Error state screenshot" : "Task completion proof"}
                       className={cn(
-                        "w-full max-h-64 object-contain rounded-xl border",
+                        "w-full max-h-64 object-contain rounded-xl border cursor-pointer hover:opacity-90 transition-opacity",
                         hasFailed ? "border-destructive/30" : "border-border/50"
                       )}
+                      onClick={() => window.open(imgSrc, "_blank")}
                     />
                   </div>
                 )}
+
                 {/* Take Over / Resume buttons for failed runs */}
                 {hasFailed && (
                   <div className="flex items-center gap-2 pt-1">
-                    {(output as any).last_url && (
+                    {lastUrl && (
                       <span className="text-[10px] text-muted-foreground truncate flex-1">
-                        Last checkpoint: {(output as any).last_url}
+                        Last checkpoint: {lastUrl}
                       </span>
                     )}
                     {onTakeOver && (
                       <Button size="sm" variant="outline" onClick={onTakeOver}
-                        className="h-7 text-xs gap-1 rounded-xl border-amber-500/30 text-amber-500 hover:bg-amber-500/10">
+                        className="h-7 text-xs gap-1 rounded-xl border-amber-500/30 text-amber-600 hover:bg-amber-500/10">
                         <Hand className="w-3 h-3" /> Take Over
                       </Button>
                     )}
                     {onResume && (
                       <Button size="sm" variant="outline" onClick={onResume}
-                        className="h-7 text-xs gap-1 rounded-xl border-primary/30 text-primary hover:bg-primary/10">
+                        className="h-7 text-xs gap-1 rounded-xl border-emerald-500/30 text-emerald-600 hover:bg-emerald-500/10">
                         <RefreshCw className="w-3 h-3" /> Resume
                       </Button>
                     )}

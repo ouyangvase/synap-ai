@@ -2,6 +2,37 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const DEFAULT_TIMEOUT = 60_000; // 60 seconds
 
+// Upload base64 screenshot to Supabase Storage and return public URL
+async function uploadScreenshot(base64Data: string, prefix: string = "shot"): Promise<string | null> {
+  try {
+    if (!base64Data || base64Data.length < 100) return null;
+    const supabaseUrl = Deno.env.get("SUPABASE_URL") || "";
+    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
+    if (!supabaseUrl || !serviceKey) return null;
+
+    const filename = `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.png`;
+    const bytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
+
+    const uploadResp = await fetch(`${supabaseUrl}/storage/v1/object/screenshots/${filename}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${serviceKey}`,
+        "Content-Type": "image/png",
+        "x-upsert": "true",
+      },
+      body: bytes,
+    });
+    if (!uploadResp.ok) {
+      console.error("Screenshot upload failed:", uploadResp.status, await uploadResp.text());
+      return null;
+    }
+    return `${supabaseUrl}/storage/v1/object/public/screenshots/${filename}`;
+  } catch (e) {
+    console.error("Screenshot upload error:", e);
+    return null;
+  }
+}
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
@@ -987,17 +1018,37 @@ Deno.serve(async (req) => {
           markdown += `\nPage content:\n${extractedContent.substring(0, 8000)}`;
         }
 
-        // ── Build checkpoint data ──
-        const checkpoints: Array<{ step_index: number; url: string; step_name: string }> = [];
-        for (const sr of structuredSteps) {
-          if (sr.status === "success" && (sr.action === "navigate" || sr.action === "login" || sr.url)) {
-            checkpoints.push({
-              step_index: sr.step,
-              url: sr.url || pageUrl,
-              step_name: sr.action,
-            });
-          }
+        // ── Part A: Outcome verification status ──
+        const verifyOk = rawStepResults.filter((s: string) => s.startsWith("VERIFY_OK"));
+        const verifyFail = rawStepResults.filter((s: string) => s.startsWith("VERIFY_FAIL"));
+        const hasVerification = verifyOk.length > 0 || verifyFail.length > 0;
+        const verificationPassed = hasVerification && verifyFail.length === 0;
+        const verificationStatus = !hasVerification ? "no_verification" : verificationPassed ? "verified" : "verification_failed";
+
+        if (hasVerification) {
+          markdown += `\n## Verification\n`;
+          markdown += `Status: **${verificationStatus === "verified" ? "PASSED" : "FAILED"}**\n`;
+          [...verifyOk, ...verifyFail].forEach((s: string) => {
+            markdown += `- ${s}\n`;
+          });
         }
+
+        // ── Part E: Completion criteria ──
+        // outcome_status: "completed" only if verification passed or no failures and no verification needed
+        const outcomeStatus = hasVerification
+          ? (verificationPassed ? "completed" : "needs_attention")
+          : (hasFailures ? "needs_attention" : "completed");
+
+        // ── Upload screenshot to Supabase Storage for persistent URL ──
+        let screenshotUrl: string | null = null;
+        if (screenshot) {
+          const prefix = hasFailures ? "error" : verificationPassed ? "proof" : "shot";
+          screenshotUrl = await uploadScreenshot(screenshot, prefix);
+        }
+
+        // Find last successful step for checkpoint info
+        const lastSuccessIndex = structuredSteps.reduce((acc: number, s: any, i: number) => s.status === "success" ? i : acc, -1);
+        const lastStepName = lastSuccessIndex >= 0 ? structuredSteps[lastSuccessIndex].action : null;
 
         return jsonResp({
           success: !hasFailures,
@@ -1011,10 +1062,13 @@ Deno.serve(async (req) => {
           step_results: structuredSteps,
           raw_step_results: rawStepResults,
           markdown_content: markdown,
-          checkpoints,
-          last_step_index: structuredSteps.length,
-          last_step_name: structuredSteps.length > 0 ? structuredSteps[structuredSteps.length - 1].action : null,
+          verification_status: verificationStatus,
+          outcome_status: outcomeStatus,
+          // Checkpoint data for Take Over / Resume
+          last_step_index: lastSuccessIndex,
+          last_step_name: lastStepName,
           last_url: pageUrl,
+          error_message: hasFailures ? failedSteps[0] : null,
         });
       }
 
@@ -2452,17 +2506,29 @@ function buildCompositeScript(
         `);
         break;
 
-      // ── Network idle wait ──
+      // ── Row-scoped actions ──
+      // These were already present in HEAD version above (find_row, click_in_row, verify_row_text, verify_text, verify_url)
+
       case "wait_for_network_idle":
         stepCode.push(`
           try {
-            const idleMs = ${Number(step.ms) || 2000};
-            const idleTimeout = ${Number(step.timeout) || 15000};
-            await Promise.race([
-              page.waitForNavigation({ waitUntil: "networkidle0", timeout: idleTimeout }).catch(() => {}),
-              new Promise(r => setTimeout(r, idleMs))
-            ]);
-            stepResults.push("Network idle wait completed (" + idleMs + "ms)");
+            const maxWait = ${Number(step.timeout) || 5000};
+            await new Promise((resolve) => {
+              let pending = 0;
+              let settled = false;
+              let idleTimer = null;
+              const cleanup = () => { page.removeListener("request", onReq); page.removeListener("requestfinished", onDone); page.removeListener("requestfailed", onDone); };
+              const onReq = () => { pending++; if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; } };
+              const onDone = () => { pending = Math.max(0, pending - 1); if (pending === 0 && !settled) { idleTimer = setTimeout(() => { settled = true; cleanup(); resolve(); }, 800); } };
+              page.on("request", onReq);
+              page.on("requestfinished", onDone);
+              page.on("requestfailed", onDone);
+              // Start idle check immediately if no pending requests
+              if (pending === 0) { idleTimer = setTimeout(() => { settled = true; cleanup(); resolve(); }, 800); }
+              // Hard timeout
+              setTimeout(() => { if (!settled) { settled = true; cleanup(); resolve(); } }, maxWait);
+            });
+            stepResults.push("Network settled (waited for in-flight requests)");
           } catch(e) { stepResults.push("wait_for_network_idle: " + e.message); }
         `);
         break;
@@ -3160,8 +3226,8 @@ function buildCompositeScript(
 
         // Wait for navigation
         if (clicked) {
-          await new Promise(r => setTimeout(r, 1500));
-          await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 8000 }).catch(() => {});
+          await new Promise(r => setTimeout(r, 800));
+          await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 5000 }).catch(() => {});
           steps.push("Post-login URL: " + page.url());
         }
 
