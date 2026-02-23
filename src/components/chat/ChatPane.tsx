@@ -523,30 +523,40 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
         )}
 
         {isStreaming && !streamingContent && (
-          <div className="flex items-center gap-2 px-4 py-3">
-            {thinkingMessage ? (
-              <>
-                <Brain className="w-4 h-4 text-primary animate-pulse" />
-                <span className="text-xs text-muted-foreground">{thinkingMessage}</span>
-              </>
-            ) : (
-              <>
-                <div className="flex gap-1">
-                  <span className="w-1.5 h-1.5 bg-primary rounded-full animate-pulse-dot" />
-                  <span className="w-1.5 h-1.5 bg-primary rounded-full animate-pulse-dot [animation-delay:0.3s]" />
-                  <span className="w-1.5 h-1.5 bg-primary rounded-full animate-pulse-dot [animation-delay:0.6s]" />
-                </div>
-                <span className="text-xs text-muted-foreground">Thinking…</span>
-              </>
-            )}
+          <div className="max-w-3xl mx-auto px-2 py-2">
+            <div className="glass rounded-2xl px-4 py-3 flex items-center gap-3">
+              {thinkingMessage ? (
+                <>
+                  <div className="w-8 h-8 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
+                    <Brain className="w-4 h-4 text-primary animate-pulse" />
+                  </div>
+                  <div className="flex flex-col gap-0.5">
+                    <span className="text-[10px] uppercase tracking-wider text-primary/60 font-medium">Thinking</span>
+                    <span className="text-xs text-muted-foreground">{thinkingMessage}</span>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="flex gap-1">
+                    <span className="w-1.5 h-1.5 bg-primary rounded-full animate-pulse-dot" />
+                    <span className="w-1.5 h-1.5 bg-primary rounded-full animate-pulse-dot [animation-delay:0.3s]" />
+                    <span className="w-1.5 h-1.5 bg-primary rounded-full animate-pulse-dot [animation-delay:0.6s]" />
+                  </div>
+                  <span className="text-xs text-muted-foreground">Thinking…</span>
+                </>
+              )}
+            </div>
           </div>
         )}
 
         {/* Show thinking message even when streaming content exists */}
         {isStreaming && streamingContent && thinkingMessage && (
-          <div className="flex items-center gap-2 px-4 py-2">
-            <Brain className="w-3.5 h-3.5 text-primary animate-pulse" />
-            <span className="text-[11px] text-muted-foreground">{thinkingMessage}</span>
+          <div className="max-w-3xl mx-auto px-2 py-1">
+            <div className="glass rounded-xl px-3 py-2 flex items-center gap-2">
+              <Brain className="w-3.5 h-3.5 text-primary animate-pulse shrink-0" />
+              <span className="text-[10px] uppercase tracking-wider text-primary/60 font-medium mr-1">Thinking</span>
+              <span className="text-[11px] text-muted-foreground">{thinkingMessage}</span>
+            </div>
           </div>
         )}
 

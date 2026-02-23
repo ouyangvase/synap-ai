@@ -202,7 +202,34 @@ serve(async (req) => {
       .eq("conversation_id", conversation_id)
       .order("created_at", { ascending: true });
 
-    let llmMessages = buildLlmMessages(systemPrompt, dbMessages || []);
+    // ── Self-improving memory: fetch relevant learnings ──
+    let learningsContext = "";
+    if (agent) {
+      const lastUserMsg = [...(dbMessages || [])].reverse().find((m: any) => m.role === "user");
+      const userText = lastUserMsg?.content || "";
+      const domainMatch = userText.match(/(?:https?:\/\/)?(?:www\.)?([a-zA-Z0-9.-]+\.[a-z]{2,})/i);
+      const domain = domainMatch ? domainMatch[1] : null;
+
+      if (domain) {
+        const { data: learnings } = await supabase
+          .from("agent_learnings")
+          .select("correction, error_pattern, success_count")
+          .eq("agent_id", agent.id)
+          .eq("domain", domain)
+          .order("success_count", { ascending: false })
+          .limit(5);
+
+        if (learnings && learnings.length > 0) {
+          learningsContext = "\n\n## LEARNED FROM PREVIOUS ATTEMPTS\n" +
+            learnings.map((l: any) =>
+              `- ${l.error_pattern ? `When "${l.error_pattern}": ` : ""}${l.correction} (verified ${l.success_count}x)`
+            ).join("\n");
+        }
+      }
+    }
+
+    const enrichedPrompt = systemPrompt + learningsContext;
+    let llmMessages = buildLlmMessages(enrichedPrompt, dbMessages || []);
     llmMessages = deduplicateUserMessages(llmMessages);
 
     const llmTools = tools.map((t) => {
@@ -272,6 +299,7 @@ serve(async (req) => {
             // Edge functions have a hard wall-clock limit (~60s free, ~150s pro).
             // Reserve 10s for overhead. Stop starting new iterations after this.
             const MAX_LOOP_ELAPSED_MS = 50_000; // 50s safety limit
+            let previousFailedAction: string | null = null; // Track for self-improving memory
 
             for (let loop = 0; loop < MAX_LOOPS; loop++) {
               // ── Wall-clock guard ──
@@ -336,6 +364,7 @@ serve(async (req) => {
                     const outcomeStatus = completedRun.output?.outcome_status;
                     const verificationStatus = completedRun.output?.verification_status;
                     if (tool.name === "browser_do" && (outcomeStatus === "needs_attention" || verificationStatus === "verification_failed")) {
+                      previousFailedAction = JSON.stringify(parsedArgs).substring(0, 500);
                       rc += "\n\n⚠️ VERIFICATION FAILED — The action may not have completed successfully. " +
                         "You MUST retry with a corrected approach. Common issues:\n" +
                         "- A confirmation dialog/modal may need to be clicked\n" +
@@ -343,6 +372,25 @@ serve(async (req) => {
                         "- A dropdown/select may need to be chosen before clicking Assign\n" +
                         "- There may be a required field that wasn't filled\n" +
                         "DO NOT report this task as complete. Issue a new browser_do call to fix and verify.";
+                    } else if (tool.name === "browser_do" && completedRun.status === "failed") {
+                      previousFailedAction = completedRun.error?.substring(0, 500) || "unknown failure";
+                    } else if (tool.name === "browser_do" && completedRun.status === "completed" && previousFailedAction) {
+                      // Self-improving memory: a retry succeeded after a failure!
+                      const urlMatch = JSON.stringify(parsedArgs).match(/(?:https?:\/\/)?(?:www\.)?([a-zA-Z0-9.-]+\.[a-z]{2,})/i);
+                      const learnDomain = urlMatch ? urlMatch[1] : "general";
+                      const correction = `After failure, succeeded with: ${JSON.stringify(parsedArgs).substring(0, 300)}`;
+                      try {
+                        await supabase.from("agent_learnings").insert({
+                          agent_id: agent?.id || null,
+                          user_id: user.id,
+                          domain: learnDomain,
+                          error_pattern: previousFailedAction.substring(0, 200),
+                          correction: correction.substring(0, 500),
+                          success_count: 1,
+                        });
+                        console.log(`[self-improving] Stored learning for domain=${learnDomain}`);
+                      } catch (e) { console.warn("[self-improving] Failed to store learning:", e); }
+                      previousFailedAction = null;
                     }
 
                     toolResultMsgs.push({
@@ -368,8 +416,13 @@ serve(async (req) => {
               const followUpBody: any = { model, messages: loopMessages, stream: true };
               if (llmTools.length > 0) followUpBody.tools = llmTools;
 
-              // ── Emit "thinking" event so UI shows the agent is reasoning ──
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "thinking", message: "Analyzing results and planning next step..." })}\n\n`));
+              // ── Emit granular "thinking" events so UI shows the agent's reasoning process ──
+              const thinkingPhase = previousFailedAction
+                ? "Analyzing failure and planning recovery..."
+                : loop === 0
+                  ? "Observing results and planning next action..."
+                  : `Iteration ${loop + 1}: Evaluating progress and deciding next step...`;
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "thinking", message: thinkingPhase })}\n\n`));
 
               const followUpResp = await fetchWithRetry(
                 "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
