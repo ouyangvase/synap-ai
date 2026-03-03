@@ -1040,10 +1040,15 @@ Deno.serve(async (req) => {
           : (hasFailures ? "needs_attention" : "completed");
 
         // ── Upload screenshot to Supabase Storage for persistent URL ──
-        let screenshotUrl: string | null = null;
+        let persistentScreenshotUrl: string | null = null;
         if (screenshot) {
           const prefix = hasFailures ? "error" : verificationPassed ? "proof" : "shot";
-          screenshotUrl = await uploadScreenshot(screenshot, prefix);
+          persistentScreenshotUrl = await uploadScreenshot(
+            screenshot,
+            conversationId,
+            structuredSteps.length,
+            prefix,
+          );
         }
 
         // Find last successful step for checkpoint info

@@ -157,7 +157,7 @@ function classifyBrowserError(error: string, url?: string): { error_class: strin
 // ── Execution State Helpers ──
 
 async function initExecutionState(
-  supabase: ReturnType<typeof createClient>,
+  supabase: any,
   jobRunId: string,
   steps: Job["steps"],
   maxRetries: number,
@@ -174,20 +174,20 @@ async function initExecutionState(
     .select("id")
     .single();
   if (error) throw new Error(`Failed to create execution state: ${error.message}`);
-  return data.id;
+  return (data as any).id;
 }
 
-async function getExecutionState(supabase: ReturnType<typeof createClient>, jobRunId: string) {
+async function getExecutionState(supabase: any, jobRunId: string) {
   const { data } = await supabase
     .from("execution_state")
     .select("*")
     .eq("job_run_id", jobRunId)
     .maybeSingle();
-  return data;
+  return data as any;
 }
 
 async function updateExecutionState(
-  supabase: ReturnType<typeof createClient>,
+  supabase: any,
   executionStateId: string,
   updates: Record<string, unknown>,
 ) {
@@ -195,7 +195,7 @@ async function updateExecutionState(
 }
 
 async function appendStepResult(
-  supabase: ReturnType<typeof createClient>,
+  supabase: any,
   executionStateId: string,
   stepResult: StepResult,
   newStatus: string,
@@ -431,7 +431,7 @@ function getReadyNodes(
 }
 
 interface ExecuteNodeContext {
-  supabase: ReturnType<typeof createClient>;
+  supabase: any;
   supabaseUrl: string;
   serviceRoleKey: string;
   anonKey: string;

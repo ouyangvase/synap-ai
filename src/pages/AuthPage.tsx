@@ -41,24 +41,24 @@ export default function AuthPage() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background p-4 relative">
+    <div className="flex min-h-screen items-center justify-center bg-background p-4 relative animate-mesh-gradient">
       {/* Theme toggle top-right */}
-      <div className="absolute top-4 right-4">
+      <div className="absolute top-4 right-4 z-10">
         <ThemeToggle />
       </div>
 
-      <div className="w-full max-w-sm space-y-8">
+      <div className="w-full max-w-sm space-y-8 animate-slide-up">
         {/* Logo + branding */}
         <div className="text-center space-y-3">
-          <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl elevation-glow mb-2 overflow-hidden">
+          <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl elevation-glow-strong overflow-hidden animate-float">
             <img src="/logo.png" alt="HahaRun" className="w-full h-full object-cover" />
           </div>
-          <h1 className="text-3xl font-bold tracking-tight">HahaRun</h1>
+          <h1 className="text-3xl font-bold tracking-tight text-gradient">HahaRun</h1>
           <p className="text-sm text-muted-foreground">AI Agent Platform</p>
         </div>
 
         {/* Form card */}
-        <div className="glass elevation-2 rounded-2xl p-6 space-y-4">
+        <div className="glass-card glass-highlight rounded-2xl p-6 space-y-4">
           <form onSubmit={handleSubmit} className="space-y-4">
             {!isLogin && (
               <div className="relative">
@@ -67,7 +67,7 @@ export default function AuthPage() {
                   placeholder="Display name"
                   value={displayName}
                   onChange={(e) => setDisplayName(e.target.value)}
-                  className="pl-10 bg-secondary/50 border-border rounded-xl h-11"
+                  className="pl-10 glass-input rounded-xl h-11"
                 />
               </div>
             )}
@@ -79,7 +79,7 @@ export default function AuthPage() {
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="pl-10 bg-secondary/50 border-border rounded-xl h-11"
+                className="pl-10 glass-input rounded-xl h-11"
               />
             </div>
             <div className="relative">
@@ -91,10 +91,14 @@ export default function AuthPage() {
                 minLength={6}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="pl-10 bg-secondary/50 border-border rounded-xl h-11"
+                className="pl-10 glass-input rounded-xl h-11"
               />
             </div>
-            <Button type="submit" className="w-full rounded-xl h-11 font-medium" disabled={loading}>
+            <Button
+              type="submit"
+              className="w-full rounded-xl h-11 font-medium bg-primary hover:bg-primary/90 active:translate-y-[1px] transition-all elevation-glow"
+              disabled={loading}
+            >
               {loading ? "Loading..." : isLogin ? "Sign in" : "Create account"}
             </Button>
           </form>

@@ -535,12 +535,12 @@ export default function JobsPage() {
   return (
     <div className="flex h-screen bg-background text-foreground overflow-hidden">
       {/* ---- Left panel: Jobs list ---- */}
-      <div className="w-80 border-r border-border glass-subtle flex flex-col">
-        <div className="p-4 border-b border-border glass-subtle flex items-center gap-2">
+      <div className="w-80 border-r border-border/30 glass-strong flex flex-col">
+        <div className="p-4 border-b border-border/30 glass-subtle flex items-center gap-2">
           <Button variant="ghost" size="icon" onClick={() => navigate("/")}>
             <ArrowLeft className="w-4 h-4" />
           </Button>
-          <h1 className="text-sm font-bold tracking-wide uppercase text-muted-foreground flex-1">
+          <h1 className="text-sm font-bold tracking-wide uppercase text-gradient flex-1">
             Jobs
           </h1>
           <Button variant="outline" size="sm" onClick={() => setCreateDialogOpen(true)} className="gap-1.5">

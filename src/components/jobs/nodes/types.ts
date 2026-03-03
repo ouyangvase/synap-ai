@@ -10,6 +10,7 @@ export type WorkflowNodeType =
   | "delay";
 
 export interface WorkflowNodeData {
+  [key: string]: unknown;
   label: string;
   action?: string;
   parameters?: Record<string, unknown>;
