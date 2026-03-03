@@ -45,13 +45,9 @@ async function fetchWithRetry(url: string, options: RequestInit, maxRetries = 3)
   throw new Error("Max retries exceeded");
 }
 
-/**
- * Sanitize a single tool_call so it is valid for Gemini's OpenAI-compat API.
- * Returns null if the call is unsalvageable (empty function name).
- */
 function sanitizeToolCall(tc: any): { id: string; type: "function"; function: { name: string; arguments: string } } | null {
   const name = tc?.function?.name || tc?.name || "";
-  if (!name || name === "unknown") return null; // DROP calls with empty/unknown name
+  if (!name || name === "unknown") return null;
 
   const id = tc?.id || tc?.function?.id || `call_${Math.random().toString(36).slice(2, 10)}`;
   let args: string;
@@ -64,11 +60,6 @@ function sanitizeToolCall(tc: any): { id: string; type: "function"; function: { 
   return { id, type: "function", function: { name, arguments: args } };
 }
 
-/**
- * Build a clean LLM message array from DB rows.
- * Drops any tool_call whose function.name is empty (prevents Gemini 400).
- * Also drops orphaned tool results with no matching assistant tool_call.
- */
 function buildLlmMessages(systemPrompt: string, dbMessages: any[]): any[] {
   const msgs: any[] = [{ role: "system", content: systemPrompt }];
   const validToolCallIds = new Set<string>();
@@ -76,7 +67,6 @@ function buildLlmMessages(systemPrompt: string, dbMessages: any[]): any[] {
   for (const m of dbMessages || []) {
     if (!m.role) continue;
 
-    // ── assistant ──
     if (m.role === "assistant") {
       const msg: any = { role: "assistant" };
       if (m.tool_calls && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
@@ -86,7 +76,6 @@ function buildLlmMessages(systemPrompt: string, dbMessages: any[]): any[] {
           msg.content = m.content || "";
           sanitized.forEach((tc: any) => validToolCallIds.add(tc.id));
         } else {
-          // All tool calls had empty names — convert to plain text
           msg.content = m.content || "(tool call omitted)";
         }
       } else {
@@ -97,7 +86,6 @@ function buildLlmMessages(systemPrompt: string, dbMessages: any[]): any[] {
       continue;
     }
 
-    // ── tool result ──
     if (m.role === "tool") {
       if (!m.tool_call_id) continue;
       if (!validToolCallIds.has(m.tool_call_id)) continue;
@@ -109,14 +97,12 @@ function buildLlmMessages(systemPrompt: string, dbMessages: any[]): any[] {
       continue;
     }
 
-    // ── user ──
     if (m.role === "user") {
       msgs.push({ role: "user", content: m.content || "" });
       continue;
     }
   }
 
-  // Gemini requires last message to be user or tool
   const last = msgs[msgs.length - 1];
   if (last && last.role === "assistant" && !last.tool_calls) {
     msgs.push({ role: "user", content: "(continue)" });
@@ -125,9 +111,6 @@ function buildLlmMessages(systemPrompt: string, dbMessages: any[]): any[] {
   return msgs;
 }
 
-/**
- * Deduplicate consecutive identical user messages.
- */
 function deduplicateUserMessages(msgs: any[]): any[] {
   const result: any[] = [];
   for (let i = 0; i < msgs.length; i++) {
@@ -139,6 +122,20 @@ function deduplicateUserMessages(msgs: any[]): any[] {
   return result;
 }
 
+// ── Plan mode detection ──
+function detectPlanMode(userContent: string): { isPlanMode: boolean; cleanContent: string } {
+  if (userContent.startsWith("[PLAN]")) {
+    return { isPlanMode: true, cleanContent: userContent.replace(/^\[PLAN\]\s*/, "") };
+  }
+  return { isPlanMode: false, cleanContent: userContent };
+}
+
+function isApprovalMessage(content: string): boolean {
+  const approvalPhrases = ["approve", "approved", "go ahead", "proceed", "execute", "run it", "do it", "yes", "confirm", "lgtm"];
+  const lower = content.toLowerCase().trim();
+  return approvalPhrases.some(p => lower === p || lower.startsWith(p));
+}
+
 // ── Main serve ──────────────────────────────────────
 
 serve(async (req) => {
@@ -148,7 +145,11 @@ serve(async (req) => {
     const authHeader = req.headers.get("Authorization");
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const geminiApiKey = Deno.env.get("GEMINI_API_KEY")!;
+    const lovableApiKey = Deno.env.get("LOVABLE_API_KEY")!;
+
+    if (!lovableApiKey) {
+      throw new Error("LOVABLE_API_KEY is not configured");
+    }
 
     const supabaseUser = createClient(supabaseUrl, Deno.env.get("SUPABASE_ANON_KEY")!, {
       global: { headers: { Authorization: authHeader || "" } },
@@ -161,7 +162,7 @@ serve(async (req) => {
       });
     }
 
-    const { conversation_id } = await req.json();
+    const { conversation_id, plan_mode } = await req.json();
     if (!conversation_id) throw new Error("conversation_id required");
 
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
@@ -179,11 +180,8 @@ serve(async (req) => {
     }
 
     const agent = conversation.agents;
-    const systemPrompt = agent?.system_prompt || "You are a helpful AI assistant.";
-    let model = agent?.model || "gemini-2.0-flash";
-    if (model.startsWith("google/")) model = "gemini-2.0-flash";
-    const validModels = ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.5-flash-preview"];
-    if (!validModels.some(m => model.includes(m))) model = "gemini-2.0-flash";
+    const baseSystemPrompt = agent?.system_prompt || "You are a helpful AI assistant.";
+    const model = agent?.model || "google/gemini-2.5-flash";
 
     let tools: ToolDef[] = [];
     if (agent) {
@@ -202,11 +200,16 @@ serve(async (req) => {
       .eq("conversation_id", conversation_id)
       .order("created_at", { ascending: true });
 
+    // ── Detect plan mode from last user message or request flag ──
+    const lastUserMsg = [...(dbMessages || [])].reverse().find((m: any) => m.role === "user");
+    const userText = lastUserMsg?.content || "";
+    const { isPlanMode, cleanContent } = detectPlanMode(userText);
+    const planModeActive = isPlanMode || plan_mode === true;
+    const isApproval = isApprovalMessage(userText);
+
     // ── Self-improving memory: fetch relevant learnings ──
     let learningsContext = "";
     if (agent) {
-      const lastUserMsg = [...(dbMessages || [])].reverse().find((m: any) => m.role === "user");
-      const userText = lastUserMsg?.content || "";
       const domainMatch = userText.match(/(?:https?:\/\/)?(?:www\.)?([a-zA-Z0-9.-]+\.[a-z]{2,})/i);
       const domain = domainMatch ? domainMatch[1] : null;
 
@@ -228,8 +231,38 @@ serve(async (req) => {
       }
     }
 
-    const enrichedPrompt = systemPrompt + learningsContext;
-    let llmMessages = buildLlmMessages(enrichedPrompt, dbMessages || []);
+    // ── Build enhanced system prompt ──
+    let systemPrompt = baseSystemPrompt + learningsContext;
+
+    if (planModeActive && !isApproval) {
+      systemPrompt += `\n\n## PLAN MODE ACTIVE
+You MUST first create a detailed numbered step-by-step plan before executing any actions.
+Format your plan as:
+**Plan:**
+1. [Step description]
+2. [Step description]
+...
+
+After presenting the plan, wait for user approval. Do NOT execute tools until the user approves.
+Think through each step carefully and explain your reasoning.`;
+    }
+
+    if (isApproval) {
+      systemPrompt += `\n\n## PLAN APPROVED
+The user has approved your plan. Now execute each step sequentially.
+Before each step, briefly state what you're about to do (thinking out loud).
+After each step, verify the result before moving to the next step.`;
+    }
+
+    // Always add thinking instructions
+    systemPrompt += `\n\n## THINKING INSTRUCTIONS
+When reasoning through complex tasks:
+- Think step by step and explain your reasoning
+- When using browser_do, describe what you're about to do and why
+- After each action, analyze the result and decide the next step
+- If something fails, explain what went wrong and try a different approach`;
+
+    let llmMessages = buildLlmMessages(systemPrompt, dbMessages || []);
     llmMessages = deduplicateUserMessages(llmMessages);
 
     const llmTools = tools.map((t) => {
@@ -245,13 +278,15 @@ serve(async (req) => {
       model, msg_count: llmMessages.length,
       roles: llmMessages.map((m: any) => m.role),
       tool_count: llmTools.length,
+      plan_mode: planModeActive,
     }));
 
+    // ── Use Lovable AI Gateway ──
     const llmResponse = await fetchWithRetry(
-      "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+      "https://ai.gateway.lovable.dev/v1/chat/completions",
       {
         method: "POST",
-        headers: { Authorization: `Bearer ${geminiApiKey}`, "Content-Type": "application/json" },
+        headers: { Authorization: `Bearer ${lovableApiKey}`, "Content-Type": "application/json" },
         body: JSON.stringify(llmBody),
       }
     );
@@ -264,14 +299,16 @@ serve(async (req) => {
           status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
+      if (llmResponse.status === 402) {
+        return new Response(JSON.stringify({ error: "AI credits exhausted — please top up." }), {
+          status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
       let detailedError = `AI service error (HTTP ${llmResponse.status})`;
       try {
         const errJson = JSON.parse(errText);
         const errMsg = errJson?.[0]?.error?.message || errJson?.error?.message;
-        if (errMsg) {
-          detailedError = errMsg;
-          if (errMsg.includes("API key not valid")) detailedError = "Gemini API key is invalid.";
-        }
+        if (errMsg) detailedError = errMsg;
       } catch {}
       throw new Error(detailedError);
     }
@@ -281,12 +318,22 @@ serve(async (req) => {
     const stream = new ReadableStream({
       async start(controller) {
         try {
+          // Emit initial thinking phase
+          if (planModeActive && !isApproval) {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "thinking", message: "Creating a step-by-step plan...", phase: "planning" })}\n\n`));
+          } else if (isApproval) {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "thinking", message: "Plan approved. Beginning execution...", phase: "executing" })}\n\n`));
+          } else {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "thinking", message: "Analyzing your request...", phase: "reasoning" })}\n\n`));
+          }
+
           const { fullContent, toolCallsList } = await processStream(llmResponse, controller, encoder);
 
           await supabase.from("messages").insert({
             conversation_id, user_id: user.id, role: "assistant",
             content: fullContent || null,
             tool_calls: toolCallsList.length > 0 ? toolCallsList : null,
+            metadata: planModeActive ? { plan_mode: true } : {},
           });
 
           // ── Agentic loop ──
@@ -296,16 +343,13 @@ serve(async (req) => {
             let currentContent = fullContent;
             const MAX_LOOPS = 16;
             const loopStartTime = Date.now();
-            // Edge functions have a hard wall-clock limit (~60s free, ~150s pro).
-            // Reserve 10s for overhead. Stop starting new iterations after this.
-            const MAX_LOOP_ELAPSED_MS = 50_000; // 50s safety limit
-            let previousFailedAction: string | null = null; // Track for self-improving memory
+            const MAX_LOOP_ELAPSED_MS = 50_000;
+            let previousFailedAction: string | null = null;
 
             for (let loop = 0; loop < MAX_LOOPS; loop++) {
-              // ── Wall-clock guard ──
               const elapsed = Date.now() - loopStartTime;
               if (elapsed > MAX_LOOP_ELAPSED_MS) {
-                console.warn(`[agentic-loop] Wall-clock limit reached (${elapsed}ms). Stopping loop to prevent edge fn timeout.`);
+                console.warn(`[agentic-loop] Wall-clock limit reached (${elapsed}ms).`);
                 controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "\n\n*Continuing in next message — processing time limit reached. Send any message to continue.*" } }] })}\n\n`));
                 break;
               }
@@ -314,16 +358,21 @@ serve(async (req) => {
               let approvalPending = false;
 
               for (const tc of currentToolCalls) {
-                if (!tc.function.name || tc.function.name === "unknown") {
-                  console.warn("Skipping tool call with empty name:", JSON.stringify(tc));
-                  continue;
-                }
+                if (!tc.function.name || tc.function.name === "unknown") continue;
 
                 const tool = tools.find((t) => t.name === tc.function.name);
                 if (!tool) { console.warn("Tool not found:", tc.function.name); continue; }
 
                 let parsedArgs: Record<string, unknown> = {};
                 try { parsedArgs = JSON.parse(tc.function.arguments); } catch {}
+
+                // Emit thinking about tool usage
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify({ 
+                  type: "thinking", 
+                  message: `Using ${tool.name}: ${tool.description}`,
+                  phase: "executing",
+                  tool_name: tool.name,
+                })}\n\n`));
 
                 const { data: toolRun } = await supabase
                   .from("tool_runs")
@@ -355,42 +404,33 @@ serve(async (req) => {
                     let rc = completedRun.output?.markdown_content || JSON.stringify(completedRun.output || {});
                     if (typeof rc !== "string") rc = JSON.stringify(rc);
 
-                    // Pass error information to the LLM if tool failed so it can debug and retry
                     if (completedRun.status === "failed") {
                       rc = `ERROR: Tool "${tool.name}" failed.\nError: ${completedRun.error || "Unknown error"}\nPlease analyze the error and try a different approach.`;
+                      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "thinking", message: `Tool failed: ${completedRun.error}. Analyzing and retrying...`, phase: "reasoning" })}\n\n`));
                     }
 
-                    // Recovery mode — nudge LLM to retry on verification failure
                     const outcomeStatus = completedRun.output?.outcome_status;
                     const verificationStatus = completedRun.output?.verification_status;
                     if (tool.name === "browser_do" && (outcomeStatus === "needs_attention" || verificationStatus === "verification_failed")) {
                       previousFailedAction = JSON.stringify(parsedArgs).substring(0, 500);
                       rc += "\n\n⚠️ VERIFICATION FAILED — The action may not have completed successfully. " +
-                        "You MUST retry with a corrected approach. Common issues:\n" +
-                        "- A confirmation dialog/modal may need to be clicked\n" +
-                        "- The button click may not have registered (try click_in_row instead of click_by_text)\n" +
-                        "- A dropdown/select may need to be chosen before clicking Assign\n" +
-                        "- There may be a required field that wasn't filled\n" +
-                        "DO NOT report this task as complete. Issue a new browser_do call to fix and verify.";
+                        "You MUST retry with a corrected approach.";
+                      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "thinking", message: "Verification failed. Re-evaluating approach...", phase: "reasoning" })}\n\n`));
                     } else if (tool.name === "browser_do" && completedRun.status === "failed") {
                       previousFailedAction = completedRun.error?.substring(0, 500) || "unknown failure";
                     } else if (tool.name === "browser_do" && completedRun.status === "completed" && previousFailedAction) {
-                      // Self-improving memory: a retry succeeded after a failure!
                       const urlMatch = JSON.stringify(parsedArgs).match(/(?:https?:\/\/)?(?:www\.)?([a-zA-Z0-9.-]+\.[a-z]{2,})/i);
                       const learnDomain = urlMatch ? urlMatch[1] : "general";
                       const correction = `After failure, succeeded with: ${JSON.stringify(parsedArgs).substring(0, 300)}`;
                       try {
                         await supabase.from("agent_learnings").insert({
-                          agent_id: agent?.id || null,
-                          user_id: user.id,
-                          domain: learnDomain,
-                          error_pattern: previousFailedAction.substring(0, 200),
-                          correction: correction.substring(0, 500),
-                          success_count: 1,
+                          agent_id: agent?.id || null, user_id: user.id,
+                          domain: learnDomain, error_pattern: previousFailedAction.substring(0, 200),
+                          correction: correction.substring(0, 500), success_count: 1,
                         });
-                        console.log(`[self-improving] Stored learning for domain=${learnDomain}`);
                       } catch (e) { console.warn("[self-improving] Failed to store learning:", e); }
                       previousFailedAction = null;
+                      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "thinking", message: "Action succeeded! Verifying result...", phase: "verifying" })}\n\n`));
                     }
 
                     toolResultMsgs.push({
@@ -416,19 +456,18 @@ serve(async (req) => {
               const followUpBody: any = { model, messages: loopMessages, stream: true };
               if (llmTools.length > 0) followUpBody.tools = llmTools;
 
-              // ── Emit granular "thinking" events so UI shows the agent's reasoning process ──
               const thinkingPhase = previousFailedAction
                 ? "Analyzing failure and planning recovery..."
                 : loop === 0
                   ? "Observing results and planning next action..."
-                  : `Iteration ${loop + 1}: Evaluating progress and deciding next step...`;
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "thinking", message: thinkingPhase })}\n\n`));
+                  : `Step ${loop + 1}: Evaluating progress...`;
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "thinking", message: thinkingPhase, phase: previousFailedAction ? "reasoning" : "executing" })}\n\n`));
 
               const followUpResp = await fetchWithRetry(
-                "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+                "https://ai.gateway.lovable.dev/v1/chat/completions",
                 {
                   method: "POST",
-                  headers: { Authorization: `Bearer ${geminiApiKey}`, "Content-Type": "application/json" },
+                  headers: { Authorization: `Bearer ${lovableApiKey}`, "Content-Type": "application/json" },
                   body: JSON.stringify(followUpBody),
                 }
               );
@@ -575,16 +614,14 @@ async function executeToolRun(
       input,
     };
 
-    // Dynamic timeout: browser_do needs time for multi-step flows but must fit in edge fn limit
     const isBrowserDo = tool.name === "browser_do";
     const stepCount = isBrowserDo && Array.isArray(input.steps) ? input.steps.length : 0;
-    // browser_do: 20s base + 10s per step, min 50s, max 90s (edge fn has ~60-150s limit)
     const effectiveTimeout = isBrowserDo
       ? Math.min(Math.max(20_000 + stepCount * 10_000, 50_000), 90_000)
       : ep.timeout_ms;
 
     let lastError = "";
-    const maxRetries = isBrowserDo ? 2 : ep.max_retries; // browser_do gets 2 retries
+    const maxRetries = isBrowserDo ? 2 : ep.max_retries;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
@@ -608,7 +645,6 @@ async function executeToolRun(
         if (!resp.ok) {
           lastError = `HTTP ${resp.status}: ${await resp.text()}`;
           if (resp.status >= 500 && attempt < maxRetries) {
-            console.warn(`[executeToolRun] ${tool.name} attempt ${attempt} failed (${resp.status}), retrying...`);
             await delay(Math.pow(2, attempt) * 1000 + Math.random() * 1000);
             continue;
           }
@@ -617,14 +653,9 @@ async function executeToolRun(
 
         const result = await resp.json();
 
-        // ── Proof-gated completion: browser_do status reflects outcome ──
         let runStatus = "completed";
-        if (isBrowserDo && result.outcome_status === "needs_attention") {
-          runStatus = "failed"; // Mark as failed so UI shows failure correctly
-        }
-        if (isBrowserDo && result.has_failures && !result.verification_status) {
-          runStatus = "failed";
-        }
+        if (isBrowserDo && result.outcome_status === "needs_attention") runStatus = "failed";
+        if (isBrowserDo && result.has_failures && !result.verification_status) runStatus = "failed";
 
         await supabase.from("tool_runs").update({
           status: runStatus, output: result, completed_at: new Date().toISOString(),
@@ -639,33 +670,25 @@ async function executeToolRun(
         return;
       } catch (err: any) {
         if (err.name === "AbortError") {
-          lastError = `Browser action timed out after ${effectiveTimeout / 1000}s (attempt ${attempt + 1}/${maxRetries + 1})`;
-          console.warn(`[executeToolRun] ${tool.name} aborted on attempt ${attempt}:`, lastError);
-          if (attempt < maxRetries) {
-            await delay(Math.pow(2, attempt) * 1000);
-            continue;
-          }
+          lastError = `Browser action timed out after ${effectiveTimeout / 1000}s`;
         } else {
           lastError = err.message;
-          if (attempt < maxRetries) {
-            console.warn(`[executeToolRun] ${tool.name} error on attempt ${attempt}, retrying:`, lastError);
-            await delay(Math.pow(2, attempt) * 1000);
-            continue;
-          }
+        }
+        if (attempt < maxRetries) {
+          await delay(Math.pow(2, attempt) * 1000);
+          continue;
         }
       }
     }
 
-    // If all retries exhausted, store a helpful error message
     const failureMsg = isBrowserDo
-      ? `${lastError}. The browser flow took too long. Try splitting into fewer steps per browser_do call, or ensure each step has proper waits.`
+      ? `${lastError}. Try splitting into fewer steps per browser_do call.`
       : lastError;
 
     await supabase.from("tool_runs").update({
       status: "failed", error: failureMsg, completed_at: new Date().toISOString(),
     }).eq("id", toolRunId);
 
-    // Also insert a tool message so the LLM knows about the failure and can self-correct
     const { data: runData } = await supabase.from("tool_runs").select("tool_call_id").eq("id", toolRunId).single();
     await supabase.from("messages").insert({
       conversation_id: conversationId, user_id: userId,
