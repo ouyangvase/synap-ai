@@ -3430,7 +3430,7 @@ function buildCompositeScript(
 
     // Always take a final screenshot (overwrite any earlier error screenshot with latest state)
     try {
-      screenshot = await page.screenshot({ encoding: "base64", fullPage: false });
+      screenshot = await page.screenshot({ encoding: "base64", fullPage: true });
     } catch {
       // If this fails, keep any earlier error screenshot we captured
     }
@@ -3591,7 +3591,7 @@ function buildActionScript(
     case "screenshot":
       return `export default async function ({ page }) {
         ${reconnectPreamble(false)}
-        const screenshot = await page.screenshot({ encoding: "base64", fullPage: ${!!params.full_page} });
+        const screenshot = await page.screenshot({ encoding: "base64", fullPage: ${params.full_page !== false} });
         const finalUrl = page.url();
         const title = await page.title();
         return {

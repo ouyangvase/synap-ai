@@ -403,6 +403,11 @@ When reasoning through complex tasks:
                   if (completedRun) {
                     let rc = completedRun.output?.markdown_content || JSON.stringify(completedRun.output || {});
                     if (typeof rc !== "string") rc = JSON.stringify(rc);
+                    // Enrich with page content so the LLM can "see" what's on screen
+                    const pageContent = completedRun.output?.content;
+                    if (pageContent && typeof pageContent === "string") {
+                      rc += `\n\n--- Page Content (first 3000 chars) ---\n${pageContent.substring(0, 3000)}`;
+                    }
 
                     if (completedRun.status === "failed") {
                       rc = `ERROR: Tool "${tool.name}" failed.\nError: ${completedRun.error || "Unknown error"}\nPlease analyze the error and try a different approach.`;
@@ -687,7 +692,11 @@ async function executeToolRun(
           status: runStatus, output: result, completed_at: new Date().toISOString(),
         }).eq("id", toolRunId);
 
-        const resultContent = result.markdown_content || JSON.stringify(result);
+        let resultContent = result.markdown_content || JSON.stringify(result);
+        // Include page content for LLM context
+        if (result.content && typeof result.content === "string") {
+          resultContent += `\n\n--- Page Content ---\n${result.content.substring(0, 3000)}`;
+        }
         const { data: runData } = await supabase.from("tool_runs").select("tool_call_id").eq("id", toolRunId).single();
         await supabase.from("messages").insert({
           conversation_id: conversationId, user_id: userId,
