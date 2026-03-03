@@ -99,16 +99,20 @@ serve(async (req) => {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), endpoint.timeout_ms);
 
+        const internalAuthHeaders = resolvedUrl.includes(supabaseUrl)
+          ? {
+              // Forward the user's JWT for protected internal functions
+              Authorization: authHeader || `Bearer ${supabaseServiceKey}`,
+              apikey: Deno.env.get("SUPABASE_ANON_KEY") || "",
+            }
+          : {};
+
         const resp = await fetch(resolvedUrl, {
           method: endpoint.http_method,
           headers: {
             "Content-Type": "application/json",
             ...(endpoint.headers as Record<string, string>),
-            // Add service role auth for internal Supabase function calls
-            ...(resolvedUrl.includes(supabaseUrl) ? {
-              Authorization: `Bearer ${supabaseServiceKey}`,
-              apikey: Deno.env.get("SUPABASE_ANON_KEY") || "",
-            } : {}),
+            ...internalAuthHeaders,
           },
           body: JSON.stringify(payload),
           signal: controller.signal,
