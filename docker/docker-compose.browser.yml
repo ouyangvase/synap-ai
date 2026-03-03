@@ -1,0 +1,45 @@
+# Self-hosted Chrome browser for browser automation
+# Usage: docker compose -f docker/docker-compose.browser.yml up -d
+#
+# Then set BROWSER_SERVICE_URL to: http://<your-server-ip>:3100
+# No token needed — it's your own instance.
+
+version: "3.8"
+
+services:
+  chrome:
+    image: browserless/chrome:latest
+    restart: unless-stopped
+    ports:
+      - "3100:3000"
+    environment:
+      # Max concurrent sessions
+      MAX_CONCURRENT_SESSIONS: 5
+      # Max queue length
+      MAX_QUEUE_LENGTH: 10
+      # Connection timeout (ms)
+      CONNECTION_TIMEOUT: 300000
+      # Disable token auth for local/self-hosted use
+      TOKEN: ""
+      # Enable /function endpoint (Puppeteer scripts)
+      ENABLE_API_GET: "true"
+      # Preboot Chrome for faster first request
+      PREBOOT_CHROME: "true"
+      # Keep Chrome alive between sessions for speed
+      KEEP_ALIVE: "true"
+      # Demo mode shows a dashboard at root URL
+      DEMO_MODE: "false"
+      # Disable Playwright route (we use Puppeteer)
+      DISABLED_FEATURES: '["playwright"]'
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    # Health check
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/pressure"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

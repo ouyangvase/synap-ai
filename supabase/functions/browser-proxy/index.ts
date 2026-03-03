@@ -82,12 +82,24 @@ function parseBrowserlessUrl(raw: string): {
   const path = parsed.pathname === "/" ? "" : parsed.pathname;
 
   // Build the WebSocket connect URL for persistent sessions
-  // If a path like /chromium/playwright is present, use it; otherwise use bare host
+  // Token is optional — self-hosted instances may not require one
+  const tokenParam = token ? `?token=${token}` : "";
   const connectWs = path
-    ? `${wsBase}${path}?token=${token}`
-    : `${wsBase}?token=${token}`;
+    ? `${wsBase}${path}${tokenParam}`
+    : `${wsBase}${tokenParam}`;
 
   return { baseUrl, wsBase, path, token, connectWs };
+}
+
+/**
+ * Build URL for Browserless API endpoints, appending token only if present.
+ * Works for both self-hosted (no token) and cloud (token required).
+ */
+function blUrl(bl: ReturnType<typeof parseBrowserlessUrl>, endpoint: string): string {
+  const sep = endpoint.includes("?") ? "&" : "?";
+  return bl.token
+    ? `${bl.baseUrl}${endpoint}${sep}token=${bl.token}`
+    : `${bl.baseUrl}${endpoint}`;
 }
 
 /**
@@ -613,7 +625,7 @@ Deno.serve(async (req) => {
       }`;
 
       const resp = await fetchWithTimeout(
-        `${bl.baseUrl}/function?token=${bl.token}`,
+        blUrl(bl, "/function"),
         {
           method: "POST",
           headers: { "Content-Type": "application/javascript" },
@@ -783,8 +795,8 @@ Deno.serve(async (req) => {
         // Verify Browserless is reachable. Try multiple endpoints and auth methods.
         let healthOk = false;
         const healthEndpoints = [
-          `${bl.baseUrl}/pressure?token=${bl.token}`,
-          `${bl.baseUrl}/json/version?token=${bl.token}`,
+          blUrl(bl, "/pressure"),
+          blUrl(bl, "/json/version"),
         ];
         for (const healthUrl of healthEndpoints) {
           try {
@@ -795,8 +807,8 @@ Deno.serve(async (req) => {
             console.warn(`[browser_do] Health check ${healthUrl} exception:`, e);
           }
         }
-        // Fallback: try with token as Authorization header
-        if (!healthOk) {
+        // Fallback: try with token as Authorization header (cloud Browserless)
+        if (!healthOk && bl.token) {
           try {
             const headerResp = await fetchWithTimeout(`${bl.baseUrl}/pressure`, {
               timeout: 10_000,
@@ -821,7 +833,7 @@ Deno.serve(async (req) => {
         const watchdogTimeout = Math.min(60_000 + steps.length * 15_000, 300_000);
 
         const resp = await fetchWithTimeout(
-          `${bl.baseUrl}/function?token=${bl.token}`,
+          blUrl(bl, "/function"),
           {
             method: "POST",
             headers: { "Content-Type": "application/javascript" },
@@ -838,7 +850,7 @@ Deno.serve(async (req) => {
             console.warn("[browser_do] Browserless 5xx, retrying once...");
             await new Promise(r => setTimeout(r, 1500));
             const retryResp = await fetchWithTimeout(
-              `${bl.baseUrl}/function?token=${bl.token}`,
+              blUrl(bl, "/function"),
               {
                 method: "POST",
                 headers: { "Content-Type": "application/javascript" },
@@ -1448,7 +1460,7 @@ Deno.serve(async (req) => {
             startUrl = "https://" + startUrl;
           }
           const script = buildCompositeScript(startUrl, []);
-          const resp = await fetchWithTimeout(`${bl.baseUrl}/function?token=${bl.token}`, {
+          const resp = await fetchWithTimeout(blUrl(bl, "/function"), {
             method: "POST", headers: { "Content-Type": "application/javascript" }, body: script, timeout: 55_000,
           });
           if (!resp.ok) {
@@ -1467,7 +1479,7 @@ Deno.serve(async (req) => {
           if (navUrl && !navUrl.startsWith("http://") && !navUrl.startsWith("https://")) navUrl = "https://" + navUrl;
           const steps = [{ action: "navigate", url: navUrl }];
           const script = buildCompositeScript(navUrl, steps);
-          const resp = await fetchWithTimeout(`${bl.baseUrl}/function?token=${bl.token}`, {
+          const resp = await fetchWithTimeout(blUrl(bl, "/function"), {
             method: "POST", headers: { "Content-Type": "application/javascript" }, body: script, timeout: 55_000,
           });
           if (!resp.ok) { const errText = await resp.text(); return jsonResp({ error: `Navigation failed`, detail: errText.slice(0, 500), markdown_content: `Navigation to ${navUrl} failed: ${errText.slice(0, 300)}` }, 502); }
@@ -1482,7 +1494,7 @@ Deno.serve(async (req) => {
           const selector = (input.selector as string) || "";
           const steps = [{ action: "click", selector }];
           const script = buildCompositeScript("", steps);
-          const resp = await fetchWithTimeout(`${bl.baseUrl}/function?token=${bl.token}`, {
+          const resp = await fetchWithTimeout(blUrl(bl, "/function"), {
             method: "POST", headers: { "Content-Type": "application/javascript" }, body: script, timeout: 55_000,
           });
           if (!resp.ok) { const errText = await resp.text(); return jsonResp({ error: `Click failed`, detail: errText.slice(0, 500), markdown_content: `Click on "${selector}" failed: ${errText.slice(0, 300)}` }, 502); }
@@ -1499,7 +1511,7 @@ Deno.serve(async (req) => {
           const clear = (input.clear as boolean) || false;
           const steps = [{ action: "type", selector, text, clear }];
           const script = buildCompositeScript("", steps);
-          const resp = await fetchWithTimeout(`${bl.baseUrl}/function?token=${bl.token}`, {
+          const resp = await fetchWithTimeout(blUrl(bl, "/function"), {
             method: "POST", headers: { "Content-Type": "application/javascript" }, body: script, timeout: 55_000,
           });
           if (!resp.ok) { const errText = await resp.text(); return jsonResp({ error: `Type failed`, detail: errText.slice(0, 500), markdown_content: `Typing into "${selector}" failed: ${errText.slice(0, 300)}` }, 502); }
@@ -1513,7 +1525,7 @@ Deno.serve(async (req) => {
         browser_screenshot: async () => {
           const steps = [{ action: "screenshot" }];
           const script = buildCompositeScript("", steps);
-          const resp = await fetchWithTimeout(`${bl.baseUrl}/function?token=${bl.token}`, {
+          const resp = await fetchWithTimeout(blUrl(bl, "/function"), {
             method: "POST", headers: { "Content-Type": "application/javascript" }, body: script, timeout: 55_000,
           });
           if (!resp.ok) { const errText = await resp.text(); return jsonResp({ error: `Screenshot failed`, markdown_content: `Screenshot failed: ${errText.slice(0, 300)}` }, 502); }
@@ -1528,7 +1540,7 @@ Deno.serve(async (req) => {
           const selector = (input.selector as string) || "body";
           const steps = [{ action: "extract", selector }];
           const script = buildCompositeScript("", steps);
-          const resp = await fetchWithTimeout(`${bl.baseUrl}/function?token=${bl.token}`, {
+          const resp = await fetchWithTimeout(blUrl(bl, "/function"), {
             method: "POST", headers: { "Content-Type": "application/javascript" }, body: script, timeout: 55_000,
           });
           if (!resp.ok) { const errText = await resp.text(); return jsonResp({ error: `Extract failed`, markdown_content: `Extract from "${selector}" failed: ${errText.slice(0, 300)}` }, 502); }
@@ -1544,7 +1556,7 @@ Deno.serve(async (req) => {
           const amount = Number(input.amount) || 500;
           const steps = [{ action: "scroll", direction, amount }];
           const script = buildCompositeScript("", steps);
-          const resp = await fetchWithTimeout(`${bl.baseUrl}/function?token=${bl.token}`, {
+          const resp = await fetchWithTimeout(blUrl(bl, "/function"), {
             method: "POST", headers: { "Content-Type": "application/javascript" }, body: script, timeout: 55_000,
           });
           if (!resp.ok) { const errText = await resp.text(); return jsonResp({ error: `Scroll failed`, markdown_content: `Scroll failed: ${errText.slice(0, 300)}` }, 502); }
@@ -1556,7 +1568,7 @@ Deno.serve(async (req) => {
           const value = (input.value as string) || "";
           const steps = [{ action: "select", selector, value }];
           const script = buildCompositeScript("", steps);
-          const resp = await fetchWithTimeout(`${bl.baseUrl}/function?token=${bl.token}`, {
+          const resp = await fetchWithTimeout(blUrl(bl, "/function"), {
             method: "POST", headers: { "Content-Type": "application/javascript" }, body: script, timeout: 55_000,
           });
           if (!resp.ok) { const errText = await resp.text(); return jsonResp({ error: `Select failed`, markdown_content: `Select "${value}" in ${selector} failed: ${errText.slice(0, 300)}` }, 502); }
