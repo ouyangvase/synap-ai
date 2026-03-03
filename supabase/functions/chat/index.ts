@@ -627,15 +627,21 @@ async function executeToolRun(
       try {
         const ac = new AbortController();
         const timeout = setTimeout(() => ac.abort(), effectiveTimeout);
+
+        // For internal Supabase function calls, use service-role key for service-to-service auth
+        const supabaseUrlEnvCheck = Deno.env.get("SUPABASE_URL") || "NONE";
+        const isInternalCall = resolvedUrl.includes(supabaseUrlEnvCheck);
+        const authHeaders = isInternalCall ? {
+          Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || ""}`,
+          apikey: Deno.env.get("SUPABASE_ANON_KEY") || "",
+        } : {};
+
         const resp = await fetch(resolvedUrl, {
           method: ep.http_method,
           headers: {
             "Content-Type": "application/json",
             ...(ep.headers as Record<string, string>),
-            ...(resolvedUrl.includes(Deno.env.get("SUPABASE_URL") || "NONE") ? {
-              Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || ""}`,
-              apikey: Deno.env.get("SUPABASE_ANON_KEY") || "",
-            } : {}),
+            ...authHeaders,
           },
           body: JSON.stringify(payload),
           signal: ac.signal,
@@ -643,7 +649,19 @@ async function executeToolRun(
         clearTimeout(timeout);
 
         if (!resp.ok) {
-          lastError = `HTTP ${resp.status}: ${await resp.text()}`;
+          const errBody = await resp.text();
+          lastError = `HTTP ${resp.status}: ${errBody}`;
+          
+          // Don't retry 401/403 auth errors or 400 schema errors — they won't resolve with retries
+          if (resp.status === 401 || resp.status === 403) {
+            lastError = `Auth error (${resp.status}): ${errBody}. This is a configuration issue, not a transient error.`;
+            break;
+          }
+          if (resp.status === 400) {
+            lastError = `Bad request (400): ${errBody}`;
+            break;
+          }
+          
           if (resp.status >= 500 && attempt < maxRetries) {
             await delay(Math.pow(2, attempt) * 1000 + Math.random() * 1000);
             continue;
@@ -674,6 +692,8 @@ async function executeToolRun(
         } else {
           lastError = err.message;
         }
+        // Don't retry auth/schema errors
+        if (lastError.includes("Auth error") || lastError.includes("Bad request")) break;
         if (attempt < maxRetries) {
           await delay(Math.pow(2, attempt) * 1000);
           continue;
@@ -681,7 +701,7 @@ async function executeToolRun(
       }
     }
 
-    const failureMsg = isBrowserDo
+    const failureMsg = isBrowserDo && !lastError.includes("Auth error") && !lastError.includes("Bad request")
       ? `${lastError}. Try splitting into fewer steps per browser_do call.`
       : lastError;
 
