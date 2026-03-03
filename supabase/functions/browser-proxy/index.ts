@@ -739,6 +739,7 @@ Deno.serve(async (req) => {
           .eq("conversation_id", conversationId)
           .eq("status", "completed")
           .in("tool_id", [
+            "00000000-0000-0000-0000-000000000020", // browser_do (current)
             "00000000-0000-0000-0001-000000000001", // browser_start
             "00000000-0000-0000-0001-000000000002", // browser_navigate
             "00000000-0000-0000-0001-000000000003", // browser_click
@@ -777,32 +778,36 @@ Deno.serve(async (req) => {
         }
 
         // ── Part B: Health check before execution ──
-        // Verify Browserless is reachable before committing to a multi-step flow
-        try {
-          const healthResp = await fetchWithTimeout(
-            `${bl.baseUrl}/json/version?token=${bl.token}`,
-            { timeout: 10_000 },
-          );
-          if (!healthResp.ok) {
-            console.warn("[browser_do] Health check failed:", healthResp.status);
-            // Retry once after a brief wait
-            await new Promise(r => setTimeout(r, 2000));
-            const retryResp = await fetchWithTimeout(
-              `${bl.baseUrl}/json/version?token=${bl.token}`,
-              { timeout: 10_000 },
-            );
-            if (!retryResp.ok) {
-              return jsonResp({
-                error: "Browser service unavailable after retry",
-                markdown_content: "Browser service is not responding. Please try again in a moment.",
-              }, 503);
-            }
+        // Verify Browserless is reachable. Try multiple endpoints and auth methods.
+        let healthOk = false;
+        const healthEndpoints = [
+          `${bl.baseUrl}/pressure?token=${bl.token}`,
+          `${bl.baseUrl}/json/version?token=${bl.token}`,
+        ];
+        for (const healthUrl of healthEndpoints) {
+          try {
+            const healthResp = await fetchWithTimeout(healthUrl, { timeout: 10_000 });
+            if (healthResp.ok) { healthOk = true; break; }
+            console.warn(`[browser_do] Health check ${healthUrl} failed:`, healthResp.status);
+          } catch (e) {
+            console.warn(`[browser_do] Health check ${healthUrl} exception:`, e);
           }
-        } catch (healthErr) {
-          console.error("[browser_do] Health check exception:", healthErr);
+        }
+        // Fallback: try with token as Authorization header
+        if (!healthOk) {
+          try {
+            const headerResp = await fetchWithTimeout(`${bl.baseUrl}/pressure`, {
+              timeout: 10_000,
+              headers: { Authorization: `Bearer ${bl.token}` },
+            });
+            if (headerResp.ok) healthOk = true;
+          } catch { /* ignore */ }
+        }
+        if (!healthOk) {
+          console.error("[browser_do] All health checks failed");
           return jsonResp({
-            error: `Browser service unreachable: ${healthErr instanceof Error ? healthErr.message : String(healthErr)}`,
-            markdown_content: "Cannot reach the browser service. Please try again.",
+            error: "Browser service unavailable",
+            markdown_content: "Browser service is not responding. Please try again in a moment.",
           }, 503);
         }
 
@@ -2974,6 +2979,8 @@ function buildCompositeScript(
 
   // The generated script includes smart locator helpers
   return `export default async function ({ page }) {
+    // Set desktop viewport so pages render at full width (not default 800x600)
+    await page.setViewport({ width: 1280, height: 800 });
 
     // ═══ Smart Locator Helpers (Puppeteer equivalents of Playwright getByLabel etc.) ═══
     const helpers = {
