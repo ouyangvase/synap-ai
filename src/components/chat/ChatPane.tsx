@@ -215,11 +215,11 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
     streamResponse();
   };
 
-  const streamResponse = async () => {
+  const streamResponse = async (autoContinue = false) => {
     if (!conversationId) return;
     setIsStreaming(true);
     setStreamingContent("");
-    setThinkingSteps([]);
+    if (!autoContinue) setThinkingSteps([]);
 
     try {
       const CHAT_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/chat`;
@@ -299,6 +299,25 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
 
       await fetchMessages();
       await fetchToolRuns();
+
+      // Auto-continue if the backend hit its time limit
+      const needsContinuation = assistantSoFar.includes("processing time limit reached") || 
+                                 assistantSoFar.includes("Send any message to continue");
+      if (needsContinuation && !takeOverMode) {
+        // Insert a silent continuation message and re-call
+        await supabase.from("messages").insert({
+          conversation_id: conversationId,
+          user_id: user!.id,
+          role: "user",
+          content: "Continue from where you left off.",
+        });
+        // Small delay before auto-continuing
+        await new Promise(r => setTimeout(r, 1000));
+        setIsStreaming(false);
+        setStreamingContent("");
+        setThinkingMessage(null);
+        return streamResponse(true);
+      }
     } catch (err: any) {
       if (err.name === "AbortError") {
         toast({ title: "Paused", description: "Execution paused by user." });
