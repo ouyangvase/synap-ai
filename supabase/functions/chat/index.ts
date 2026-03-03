@@ -249,9 +249,9 @@ Think through each step carefully and explain your reasoning.`;
 
     if (isApproval) {
       systemPrompt += `\n\n## PLAN APPROVED
-The user has approved your plan. Now execute each step sequentially.
-Before each step, briefly state what you're about to do (thinking out loud).
-After each step, verify the result before moving to the next step.`;
+The user has approved your plan. Execute autonomously until the goal is fully completed or a hard blocker appears.
+Do NOT pause for user confirmation between steps.
+After each tool call, verify progress and immediately continue with the next best action.`;
     }
 
     // Always add thinking instructions
@@ -341,9 +341,9 @@ When reasoning through complex tasks:
             let loopMessages = [...llmMessages];
             let currentToolCalls = toolCallsList;
             let currentContent = fullContent;
-            const MAX_LOOPS = 16;
+            const MAX_LOOPS = 30;
             const loopStartTime = Date.now();
-            const MAX_LOOP_ELAPSED_MS = 50_000;
+            const MAX_LOOP_ELAPSED_MS = 180_000;
             let previousFailedAction: string | null = null;
 
             for (let loop = 0; loop < MAX_LOOPS; loop++) {
@@ -391,7 +391,7 @@ When reasoning through complex tasks:
                   approvalPending = true;
                 } else if (toolRun) {
                   controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "tool_call", tool_run_id: toolRun.id, tool_name: tool.name })}\n\n`));
-                  await executeToolRun(supabase, toolRun.id, tool, parsedArgs, user.id, conversation_id);
+                  await executeToolRun(supabase, toolRun.id, tool, parsedArgs, user.id, conversation_id, authHeader || undefined);
                   controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "tool_result", tool_run_id: toolRun.id })}\n\n`));
 
                   const { data: completedRun } = await supabase
@@ -587,7 +587,8 @@ async function processStream(
 
 async function executeToolRun(
   supabase: any, toolRunId: string, tool: ToolDef,
-  input: Record<string, unknown>, userId: string, conversationId: string
+  input: Record<string, unknown>, userId: string, conversationId: string,
+  forwardedAuthHeader?: string
 ) {
   try {
     const { data: endpoint } = await supabase
@@ -628,13 +629,20 @@ async function executeToolRun(
         const ac = new AbortController();
         const timeout = setTimeout(() => ac.abort(), effectiveTimeout);
 
-        // For internal Supabase function calls, use service-role key for service-to-service auth
+        // Internal function auth strategy:
+        // - /browser-proxy/agent-action is service-to-service and does not require user JWT
+        // - Other internal protected endpoints should receive the user's JWT when available
         const supabaseUrlEnvCheck = Deno.env.get("SUPABASE_URL") || "NONE";
         const isInternalCall = resolvedUrl.includes(supabaseUrlEnvCheck);
-        const authHeaders = isInternalCall ? {
-          Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || ""}`,
-          apikey: Deno.env.get("SUPABASE_ANON_KEY") || "",
-        } : {};
+        const isAgentAction = resolvedUrl.includes("/functions/v1/browser-proxy/agent-action");
+        const authHeaders = isInternalCall
+          ? (isAgentAction
+            ? { apikey: Deno.env.get("SUPABASE_ANON_KEY") || "" }
+            : {
+                Authorization: forwardedAuthHeader || `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || ""}`,
+                apikey: Deno.env.get("SUPABASE_ANON_KEY") || "",
+              })
+          : {};
 
         const resp = await fetch(resolvedUrl, {
           method: ep.http_method,
@@ -702,7 +710,7 @@ async function executeToolRun(
     }
 
     const failureMsg = isBrowserDo && !lastError.includes("Auth error") && !lastError.includes("Bad request")
-      ? `${lastError}. Try splitting into fewer steps per browser_do call.`
+      ? `${lastError}. Keep steps small (1-4), use supported actions, and continue from last successful state.`
       : lastError;
 
     await supabase.from("tool_runs").update({
