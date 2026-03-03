@@ -1,58 +1,54 @@
 
-Goal: fix the persistent `401 Unauthorized — invalid token` loop and make browser tasks (including your `tomy.my` login + order assignment flow) complete reliably.
 
-1) Root-cause findings (from code + DB)
-- `chat` edge function executes tools directly (`executeToolRun`) and still sends **service-role bearer** to internal browser calls.
-- `browser-proxy` validates user identity with `auth.getUser()` for authenticated routes, so service-role bearer becomes `Unauthorized — invalid token`.
-- `browser_do` endpoint in DB is misconfigured to:
-  - `{SUPABASE_URL}/functions/v1/browser-proxy`
-  - but chat payload format (`{meta,input}`) is designed for:
-  - `{SUPABASE_URL}/functions/v1/browser-proxy/agent-action`
-- `browser_do` input schema in DB is too narrow (action/selector/value only), so model emits malformed steps (e.g. `WAIT_FOR_ELEMENT`) and retries poorly.
+## Issues Identified
 
-2) Implementation plan
-- Update `supabase/functions/chat/index.ts`:
-  - Forward original user JWT for internal authenticated endpoints.
-  - For service-to-service endpoint `/agent-action`, use endpoint header config only (no user auth required).
-  - Add explicit auth-failure classification: if tool error contains 401/invalid token, stop retries and emit actionable message.
-- Database migration:
-  - Fix `browser_do` `tool_endpoints.endpoint_url` to `/functions/v1/browser-proxy/agent-action`.
-  - Expand `browser_do.input_schema` to supported actions (`login`, `click_by_text`, `fill_by_*`, `wait_for_text`, `wait_for_url`, `press`, `get_html`, `screenshot`, etc.).
-  - Increase guardrails in tool description to enforce small phased calls and supported step names only.
-- Prompt hardening (agent system prompt):
-  - Add strict “allowed browser_do actions” section.
-  - Add deterministic strategy for your task type:
-    - login → open Ready Sales → search `YX184` → open order row → assign runner `YC` → verification screenshot/extract text.
-  - Require evidence-based completion (“done” only if UI confirmation or status text appears).
+**1. Screenshot appears half-image**: All browser screenshots use `fullPage: false` in Puppeteer, which only captures the visible viewport (typically 800x600). The images display correctly at full width, but the *content captured* is only the viewport portion. Fix: change the final screenshot capture to `fullPage: true`.
 
-3) Reliability upgrades
-- In chat tool loop:
-  - Do not append misleading “split steps” advice for auth failures.
-  - Retry only transient errors (5xx/timeout), not 401/400 schema errors.
-- In browser result handling:
-  - Return structured failure reason (`auth_error`, `schema_error`, `site_error`, `selector_error`) to improve self-correction.
+**2. Agent not self-thinking to complete tasks**: The agent keeps stopping after failures or partial progress instead of autonomously reasoning and retrying. Two root causes:
+   - The system prompt says "1-3 steps per call" which makes the agent timid — it does one small thing, fails, and stops instead of analyzing the page and adapting.
+   - The agent needs stronger instructions to analyze page content from tool results and use that to decide next actions (e.g., search for an order, find the assign button).
 
-4) Validation plan (end-to-end)
-- Test from the same conversation:
-  1. Run a minimal `browser_do` screenshot call (should no longer 401).
-  2. Run login-only flow to `www.tomy.my` (proof screenshot).
-  3. Run navigation/search flow for order `YX184`.
-  4. Run assignment action to runner `YC`.
-  5. Confirm completion by extracting visible confirmation text + final screenshot URL.
-- Success criteria:
-  - zero 401 invalid-token errors,
-  - tool status `completed`,
-  - final output includes visual/text proof of assignment.
+## Plan
 
-5) Technical details (for implementation)
-```text
-Current failing path:
-chat.executeToolRun -> fetch(browser-proxy root) + service-role bearer
--> browser-proxy authenticated branch -> auth.getUser() fails -> 401 invalid token
+### A. Fix full-page screenshots (browser-proxy)
+- Change the final screenshot in `agent-action` composite script from `fullPage: false` to `fullPage: true` (line ~3433 in browser-proxy/index.ts)
+- Also change the standalone `screenshot` action to default to `fullPage: true` (line ~3594)
 
-Target path:
-chat.executeToolRun -> fetch(browser-proxy/agent-action) + {meta,input}
--> agent-action branch (service-to-service flow)
--> browser_do executes supported step schema
--> verified completion artifacts returned
+### B. Strengthen autonomous execution (database: agents system prompt)
+- Update the agent's system prompt to:
+  - Remove the "1-3 steps" limitation — allow up to 6 steps per call
+  - Add explicit instructions: "After each tool result, READ the page content/extracted text to understand what is on screen, then decide what to do next"
+  - Add: "If a step fails, do NOT stop. Analyze the error and page content, then try a different approach immediately"
+  - Add: "Use `extract` or `get_html` to understand page structure when you can't find elements"
+  - Add specific tomy.my workflow guidance: navigate to Ready Sales, use search input, find order row, click assign, select runner
+
+### C. Improve tool result feedback to LLM (chat/index.ts)
+- When a browser_do result includes `content` (page text), ensure it's included in the tool result message so the LLM can read what's on the page and make intelligent decisions
+- Currently only `markdown_content` or raw JSON is sent — the page content extraction is lost
+
+### D. Fix date-fns build error
+- Pin `date-fns` to `3.6.0` in package.json to resolve the corrupted locale module
+
+### Technical Details
+
+**Screenshot fix** — single line change in browser-proxy composite script:
 ```
+// Line ~3433: fullPage: false → fullPage: true
+screenshot = await page.screenshot({ encoding: "base64", fullPage: true });
+```
+
+**Agent prompt enhancement** — key additions:
+```
+- Use up to 6 steps per browser_do call for efficiency
+- After EVERY tool result, read the returned page content to understand current state
+- Use extract/get_html to discover page structure when elements aren't found
+- Never stop on failure — analyze, adapt, retry with different approach
+```
+
+**Tool result enrichment** — in chat/index.ts executeToolRun:
+```
+// Include page content in tool result message for LLM context
+const pageContent = result.content ? `\n\nPage content:\n${result.content.substring(0, 3000)}` : "";
+const resultContent = (result.markdown_content || JSON.stringify(result)) + pageContent;
+```
+
