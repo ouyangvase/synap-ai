@@ -1,93 +1,58 @@
 
+Goal: fix the persistent `401 Unauthorized — invalid token` loop and make browser tasks (including your `tomy.my` login + order assignment flow) complete reliably.
 
-# Plan: Add Plan Mode, Self-Thinking, and Browser Task Execution
+1) Root-cause findings (from code + DB)
+- `chat` edge function executes tools directly (`executeToolRun`) and still sends **service-role bearer** to internal browser calls.
+- `browser-proxy` validates user identity with `auth.getUser()` for authenticated routes, so service-role bearer becomes `Unauthorized — invalid token`.
+- `browser_do` endpoint in DB is misconfigured to:
+  - `{SUPABASE_URL}/functions/v1/browser-proxy`
+  - but chat payload format (`{meta,input}`) is designed for:
+  - `{SUPABASE_URL}/functions/v1/browser-proxy/agent-action`
+- `browser_do` input schema in DB is too narrow (action/selector/value only), so model emits malformed steps (e.g. `WAIT_FOR_ELEMENT`) and retries poorly.
 
-## Overview
+2) Implementation plan
+- Update `supabase/functions/chat/index.ts`:
+  - Forward original user JWT for internal authenticated endpoints.
+  - For service-to-service endpoint `/agent-action`, use endpoint header config only (no user auth required).
+  - Add explicit auth-failure classification: if tool error contains 401/invalid token, stop retries and emit actionable message.
+- Database migration:
+  - Fix `browser_do` `tool_endpoints.endpoint_url` to `/functions/v1/browser-proxy/agent-action`.
+  - Expand `browser_do.input_schema` to supported actions (`login`, `click_by_text`, `fill_by_*`, `wait_for_text`, `wait_for_url`, `press`, `get_html`, `screenshot`, etc.).
+  - Increase guardrails in tool description to enforce small phased calls and supported step names only.
+- Prompt hardening (agent system prompt):
+  - Add strict “allowed browser_do actions” section.
+  - Add deterministic strategy for your task type:
+    - login → open Ready Sales → search `YX184` → open order row → assign runner `YC` → verification screenshot/extract text.
+  - Require evidence-based completion (“done” only if UI confirmation or status text appears).
 
-Add three capabilities to the AI agent: (1) a visible "thinking/reasoning" phase where the model shows its chain-of-thought, (2) a "Plan Mode" where the agent creates a step-by-step plan before executing, and (3) wiring the browser automation tool (`browser_do`) into the chat agent so it can complete tasks end-to-end.
+3) Reliability upgrades
+- In chat tool loop:
+  - Do not append misleading “split steps” advice for auth failures.
+  - Retry only transient errors (5xx/timeout), not 401/400 schema errors.
+- In browser result handling:
+  - Return structured failure reason (`auth_error`, `schema_error`, `site_error`, `selector_error`) to improve self-correction.
 
----
+4) Validation plan (end-to-end)
+- Test from the same conversation:
+  1. Run a minimal `browser_do` screenshot call (should no longer 401).
+  2. Run login-only flow to `www.tomy.my` (proof screenshot).
+  3. Run navigation/search flow for order `YX184`.
+  4. Run assignment action to runner `YC`.
+  5. Confirm completion by extracting visible confirmation text + final screenshot URL.
+- Success criteria:
+  - zero 401 invalid-token errors,
+  - tool status `completed`,
+  - final output includes visual/text proof of assignment.
 
-## Problem: Missing GEMINI_API_KEY
+5) Technical details (for implementation)
+```text
+Current failing path:
+chat.executeToolRun -> fetch(browser-proxy root) + service-role bearer
+-> browser-proxy authenticated branch -> auth.getUser() fails -> 401 invalid token
 
-The chat edge function calls `Deno.env.get("GEMINI_API_KEY")` but this secret doesn't exist. Only `BROWSER_SERVICE_URL` and `LOVABLE_API_KEY` are configured. We need to either:
-- Add the Gemini API key as a secret, OR
-- Switch to the Lovable AI Gateway (which uses `LOVABLE_API_KEY` already available)
-
-**Recommendation**: Switch to Lovable AI Gateway (`https://ai.gateway.lovable.dev/v1/chat/completions`) using the existing `LOVABLE_API_KEY`. This avoids needing a separate Gemini key and uses `google/gemini-3-flash-preview` by default.
-
----
-
-## Changes
-
-### 1. Chat Edge Function (`supabase/functions/chat/index.ts`)
-
-**Switch to Lovable AI Gateway:**
-- Replace `generativelanguage.googleapis.com` calls with `https://ai.gateway.lovable.dev/v1/chat/completions`
-- Use `LOVABLE_API_KEY` for auth instead of `GEMINI_API_KEY`
-- Set model to `google/gemini-2.5-flash` (fast + good reasoning)
-
-**Add Plan Mode logic:**
-- Detect `[PLAN]` prefix in user messages or a `plan_mode: true` flag
-- When plan mode is active, prepend a system instruction: "First create a numbered step-by-step plan. Present the plan to the user. Wait for approval before executing."
-- After the user approves (sends "go ahead", "approved", etc.), the agent executes each plan step sequentially, emitting thinking events between steps
-
-**Enhanced thinking events:**
-- Emit structured `{ type: "thinking", message, phase }` SSE events with phases: `planning`, `reasoning`, `executing`, `verifying`
-- Include the agent's internal reasoning in the thinking stream
-
-**Add `browser_do` tool definition:**
-- Create a new tool record for `browser_do` that calls the `browser-proxy` edge function
-- The tool accepts `{ url, steps: [{ action, selector, value }] }` and returns screenshots + results
-
-### 2. Add `browser_do` Tool to Database
-
-- Insert a `browser_do` tool into `tools` table with proper schema
-- Insert a `tool_endpoint` pointing to `{SUPABASE_URL}/functions/v1/browser-proxy/action`
-- Link it to the MuleRun Agent via `agent_tools`
-
-### 3. System Prompt Enhancement (`agents` table update)
-
-Update the agent's system prompt to include:
-- Plan mode instructions: "When given a complex task, first create a plan with numbered steps. Show the plan, then execute step by step."
-- Thinking instructions: "Think through each step carefully. When using browser_do, describe what you're about to do and why."
-- Browser capabilities: "You can use browser_do to navigate websites, click buttons, fill forms, and extract data."
-
-### 4. ChatPane UI (`src/components/chat/ChatPane.tsx`)
-
-**Plan Mode toggle:**
-- Add a "Plan" toggle button next to the send button
-- When enabled, prefix messages with `[PLAN]` metadata
-- Show a visual indicator when the agent is in planning mode
-
-**Enhanced thinking display:**
-- Show a collapsible "Thinking" section with the agent's reasoning
-- Different icons for phases: lightbulb (planning), brain (reasoning), cog (executing), check (verifying)
-- Animate transitions between thinking phases
-
-**Plan approval UI:**
-- When the agent presents a plan, show "Approve" / "Edit Plan" buttons
-- Clicking "Approve" sends a confirmation message to continue execution
-
-### 5. MessageBubble Enhancement (`src/components/chat/MessageBubble.tsx`)
-
-- Detect plan-formatted messages (numbered lists) and render them with checkmarks as steps complete
-- Add a distinct visual style for "plan" messages (glass card with step indicators)
-
-### 6. New ThinkingPanel Component (`src/components/chat/ThinkingPanel.tsx`)
-
-- Collapsible panel showing the agent's chain-of-thought
-- Renders thinking steps with timestamps
-- Shows current phase with animated indicator
-- Persists thinking history for the conversation
-
----
-
-## Files to Modify/Create
-
-1. `supabase/functions/chat/index.ts` — Switch to Lovable AI Gateway, add plan mode logic, enhanced thinking
-2. `src/components/chat/ChatPane.tsx` — Plan mode toggle, thinking display, plan approval UI
-3. `src/components/chat/MessageBubble.tsx` — Plan message rendering with step tracking
-4. `src/components/chat/ThinkingPanel.tsx` — New component for reasoning display
-5. Database migration — Add `browser_do` tool, endpoint, agent link; update system prompt
-
+Target path:
+chat.executeToolRun -> fetch(browser-proxy/agent-action) + {meta,input}
+-> agent-action branch (service-to-service flow)
+-> browser_do executes supported step schema
+-> verified completion artifacts returned
+```
