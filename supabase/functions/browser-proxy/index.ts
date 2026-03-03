@@ -658,12 +658,13 @@ Deno.serve(async (req) => {
   }
 
   // ── Screenshot upload helper ──
-  // Uploads base64 screenshot to Supabase Storage and returns public URL
+  // Uploads base64 screenshot to Supabase Storage, always overwriting a single
+  // file per conversation so storage stays clean (no accumulation).
   async function uploadScreenshot(
     base64Data: string,
     conversationId: string,
-    stepIndex: number,
-    label: string = "final",
+    _stepIndex: number,
+    _label: string = "final",
   ): Promise<string | null> {
     if (!base64Data || base64Data.length < 100) return null;
     try {
@@ -674,13 +675,13 @@ Deno.serve(async (req) => {
       for (let i = 0; i < binaryString.length; i++) {
         bytes[i] = binaryString.charCodeAt(i);
       }
-      const timestamp = Date.now();
-      const filePath = `${conversationId || "unknown"}/${timestamp}-${label}-step${stepIndex}.png`;
+      // Always use a single fixed filename per conversation — upsert overwrites
+      const filePath = `${conversationId || "unknown"}/latest.png`;
       const { error } = await supa.storage
         .from("browser-screenshots")
         .upload(filePath, bytes, {
           contentType: "image/png",
-          upsert: false,
+          upsert: true,
         });
       if (error) {
         console.error("[uploadScreenshot] Upload error:", error.message);
@@ -689,7 +690,8 @@ Deno.serve(async (req) => {
       const { data: publicUrlData } = supa.storage
         .from("browser-screenshots")
         .getPublicUrl(filePath);
-      return publicUrlData?.publicUrl || null;
+      // Append cache-buster so the browser doesn't show stale cached image
+      return publicUrlData?.publicUrl ? `${publicUrlData.publicUrl}?t=${Date.now()}` : null;
     } catch (err) {
       console.error("[uploadScreenshot] Exception:", err);
       return null;
