@@ -362,7 +362,7 @@ export function ToolCard({ toolRun, conversationId, onTakeOver, onResume }: Prop
                       src={imgSrc}
                       alt={hasFailed ? "Error state screenshot" : "Task completion proof"}
                       className={cn(
-                        "w-full max-h-64 object-contain rounded-xl border cursor-pointer hover:opacity-90 transition-opacity",
+                        "w-full object-contain rounded-xl border cursor-pointer hover:opacity-90 transition-opacity",
                         hasFailed ? "border-destructive/30" : "border-border/50"
                       )}
                       onClick={() => window.open(imgSrc, "_blank")}
