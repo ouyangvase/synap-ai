@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { Button } from "@/components/ui/button";
-import { Plus, MessageSquare, LogOut, X, Monitor, Calendar, Trash2, Sparkles, Search } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { Plus, MessageSquare, LogOut, X, Monitor, Calendar, Trash2, Sparkles, Search, Pencil, Check } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { formatDistanceToNow } from "date-fns";
@@ -27,7 +28,9 @@ export function ConversationSidebar({ activeId, onSelect, onNew, open, onClose }
   const { user, signOut } = useAuth();
   const navigate = useNavigate();
   const [conversations, setConversations] = useState<Conversation[]>([]);
-
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editTitle, setEditTitle] = useState("");
+  const editInputRef = useRef<HTMLInputElement>(null);
   const fetchConversations = async () => {
     if (!user) return;
     const { data } = await supabase
@@ -46,6 +49,22 @@ export function ConversationSidebar({ activeId, onSelect, onNew, open, onClose }
       navigate("/");
     }
     fetchConversations();
+  };
+
+  const handleStartRename = (e: React.MouseEvent, c: Conversation) => {
+    e.stopPropagation();
+    setEditingId(c.id);
+    setEditTitle(c.title);
+    setTimeout(() => editInputRef.current?.focus(), 50);
+  };
+
+  const handleSaveRename = async (id: string) => {
+    const trimmed = editTitle.trim();
+    if (trimmed && trimmed !== conversations.find(c => c.id === id)?.title) {
+      await supabase.from("conversations").update({ title: trimmed }).eq("id", id);
+      fetchConversations();
+    }
+    setEditingId(null);
   };
 
   useEffect(() => {
@@ -122,20 +141,42 @@ export function ConversationSidebar({ activeId, onSelect, onNew, open, onClose }
                 : "text-muted-foreground hover:glass hover:translate-y-[-1px]"
             )}
           >
-            <div className="flex items-center gap-2">
-              <MessageSquare className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
-              <span className="truncate pr-6">{c.title}</span>
-            </div>
-            <p className="text-xs text-muted-foreground mt-0.5 ml-5.5">
-              {formatDistanceToNow(new Date(c.updated_at), { addSuffix: true })}
-            </p>
-            <span
-              role="button"
-              onClick={(e) => handleDelete(e, c.id)}
-              className="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-lg hover:bg-destructive/20 hover:text-destructive"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </span>
+            {editingId === c.id ? (
+              <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                <Input
+                  ref={editInputRef}
+                  value={editTitle}
+                  onChange={(e) => setEditTitle(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleSaveRename(c.id);
+                    if (e.key === "Escape") setEditingId(null);
+                  }}
+                  onBlur={() => handleSaveRename(c.id)}
+                  className="h-7 text-sm rounded-lg px-2 py-0"
+                />
+                <button onClick={() => handleSaveRename(c.id)} className="p-1 rounded-lg hover:bg-primary/20 text-primary shrink-0">
+                  <Check className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            ) : (
+              <>
+                <div className="flex items-center gap-2">
+                  <MessageSquare className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
+                  <span className="truncate pr-12">{c.title}</span>
+                </div>
+                <p className="text-xs text-muted-foreground mt-0.5 ml-5.5">
+                  {formatDistanceToNow(new Date(c.updated_at), { addSuffix: true })}
+                </p>
+                <div className="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5">
+                  <span role="button" onClick={(e) => handleStartRename(e, c)} className="p-1 rounded-lg hover:bg-accent">
+                    <Pencil className="w-3 h-3" />
+                  </span>
+                  <span role="button" onClick={(e) => handleDelete(e, c.id)} className="p-1 rounded-lg hover:bg-destructive/20 hover:text-destructive">
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </span>
+                </div>
+              </>
+            )}
           </button>
         ))}
       </div>
