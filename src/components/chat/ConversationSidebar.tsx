@@ -64,16 +64,18 @@ export function ConversationSidebar({ activeId, onSelect, onNew, open, onClose }
   return (
     <aside
       className={cn(
-        "flex flex-col h-full bg-sidebar border-r border-sidebar-border transition-all duration-200",
+        "flex flex-col h-full glass-strong border-r border-border/50 transition-all duration-300",
         open ? "w-72" : "w-0 overflow-hidden",
         "md:relative fixed z-40 inset-y-0 left-0"
       )}
     >
       {/* Header */}
-      <div className="flex items-center justify-between p-4 border-b border-sidebar-border safe-top">
+      <div className="flex items-center justify-between p-4 border-b border-border/30 safe-top">
         <div className="flex items-center gap-2.5">
-          <img src="/logo.png" alt="HahaRun" className="w-7 h-7 rounded-lg object-cover" />
-          <span className="font-semibold text-sm tracking-tight">HahaRun</span>
+          <div className="w-7 h-7 rounded-lg overflow-hidden elevation-glow animate-glow-pulse">
+            <img src="/logo.png" alt="HahaRun" className="w-full h-full object-cover" />
+          </div>
+          <span className="font-semibold text-sm tracking-tight text-gradient">HahaRun</span>
         </div>
         <div className="flex items-center gap-1">
           <ThemeToggle />
@@ -85,26 +87,26 @@ export function ConversationSidebar({ activeId, onSelect, onNew, open, onClose }
 
       {/* Navigation */}
       <div className="p-3 space-y-1">
-        <Button onClick={onNew} variant="outline" className="w-full justify-start gap-2 text-sm border-dashed rounded-xl h-9">
+        <Button onClick={onNew} variant="outline" className="w-full justify-start gap-2 text-sm border-dashed rounded-xl h-9 glass hover:translate-y-[-1px] hover:elevation-2 transition-all">
           <Plus className="w-4 h-4" />
           New conversation
         </Button>
-        <Button onClick={() => navigate("/browser")} variant="ghost" className="w-full justify-start gap-2 text-sm rounded-xl h-9">
-          <Monitor className="w-4 h-4" />
-          Browser Agent
-        </Button>
-        <Button onClick={() => navigate("/images")} variant="ghost" className="w-full justify-start gap-2 text-sm rounded-xl h-9">
-          <Sparkles className="w-4 h-4" />
-          Image Generator
-        </Button>
-        <Button onClick={() => navigate("/jobs")} variant="ghost" className="w-full justify-start gap-2 text-sm rounded-xl h-9">
-          <Calendar className="w-4 h-4" />
-          Jobs & Automation
-        </Button>
-        <Button onClick={() => navigate("/search")} variant="ghost" className="w-full justify-start gap-2 text-sm rounded-xl h-9">
-          <Search className="w-4 h-4" />
-          Verified Search
-        </Button>
+        {[
+          { icon: Monitor, label: "Browser Agent", path: "/browser" },
+          { icon: Sparkles, label: "Image Generator", path: "/images" },
+          { icon: Calendar, label: "Jobs & Automation", path: "/jobs" },
+          { icon: Search, label: "Verified Search", path: "/search" },
+        ].map((item) => (
+          <Button
+            key={item.path}
+            onClick={() => navigate(item.path)}
+            variant="ghost"
+            className="w-full justify-start gap-2 text-sm rounded-xl h-9 hover:translate-y-[-1px] hover:elevation-1 transition-all"
+          >
+            <item.icon className="w-4 h-4" />
+            {item.label}
+          </Button>
+        ))}
       </div>
 
       {/* Conversation list */}
@@ -114,10 +116,10 @@ export function ConversationSidebar({ activeId, onSelect, onNew, open, onClose }
             key={c.id}
             onClick={() => onSelect(c.id)}
             className={cn(
-              "w-full text-left px-3 py-2.5 rounded-xl text-sm transition-colors group relative",
+              "w-full text-left px-3 py-2.5 rounded-xl text-sm transition-all group relative",
               activeId === c.id
-                ? "bg-sidebar-accent text-sidebar-accent-foreground elevation-1"
-                : "text-sidebar-foreground hover:bg-sidebar-accent/50"
+                ? "glass-card border-l-2 border-l-primary text-foreground"
+                : "text-muted-foreground hover:glass hover:translate-y-[-1px]"
             )}
           >
             <div className="flex items-center gap-2">
@@ -139,7 +141,7 @@ export function ConversationSidebar({ activeId, onSelect, onNew, open, onClose }
       </div>
 
       {/* Footer */}
-      <div className="p-3 border-t border-sidebar-border safe-bottom">
+      <div className="p-3 border-t border-border/30 safe-bottom glass-subtle">
         <div className="flex items-center justify-between">
           <span className="text-xs text-muted-foreground truncate max-w-[180px]">
             {user?.email}

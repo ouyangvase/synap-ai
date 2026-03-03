@@ -564,7 +564,7 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
       </div>
 
       {/* Input area */}
-      <div className="border-t border-border p-4 glass-subtle">
+      <div className="border-t border-border/30 p-4 glass-strong">
         <form
           onSubmit={(e) => { e.preventDefault(); handleSend(); }}
           className="flex gap-2 max-w-3xl mx-auto"
@@ -574,9 +574,9 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
             onChange={(e) => setInput(e.target.value)}
             placeholder={takeOverMode ? "Type instructions for the agent..." : "Message the agent…"}
             disabled={isStreaming}
-            className="flex-1 bg-secondary/50 border-border rounded-xl h-11"
+            className="flex-1 glass-input border-border/30 rounded-2xl h-11"
           />
-          <Button type="submit" size="icon" disabled={isStreaming || !input.trim()} className="rounded-xl h-11 w-11 shrink-0">
+          <Button type="submit" size="icon" disabled={isStreaming || !input.trim()} className="rounded-2xl h-11 w-11 shrink-0 elevation-glow active:translate-y-[1px] transition-all">
             <Send className="w-4 h-4" />
           </Button>
         </form>

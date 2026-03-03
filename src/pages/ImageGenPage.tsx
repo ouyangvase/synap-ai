@@ -38,13 +38,13 @@ export default function ImageGenPage() {
 
   const fetchGenerations = useCallback(async () => {
     if (!user) return;
-    const { data } = await supabase
+    const { data } = await (supabase as any)
       .from("image_generations")
       .select("*")
       .eq("user_id", user.id)
       .order("created_at", { ascending: false })
       .limit(50);
-    if (data) setGenerations(data as ImageGeneration[]);
+    if (data) setGenerations(data as unknown as ImageGeneration[]);
   }, [user]);
 
   useEffect(() => {
@@ -111,7 +111,7 @@ export default function ImageGenPage() {
 
   const handleDelete = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
-    await supabase.from("image_generations").delete().eq("id", id);
+    await (supabase as any).from("image_generations").delete().eq("id", id);
     if (selectedImage?.id === id) setSelectedImage(null);
     fetchGenerations();
   };
@@ -136,18 +136,18 @@ export default function ImageGenPage() {
   return (
     <div className="flex h-screen bg-background text-foreground overflow-hidden">
       {/* Left: Controls + History */}
-      <div className="w-80 border-r border-border glass-subtle flex flex-col">
-        <div className="p-4 border-b border-border glass-subtle flex items-center gap-2">
+      <div className="w-80 border-r border-border/30 glass-strong flex flex-col">
+        <div className="p-4 border-b border-border/30 glass-subtle flex items-center gap-2">
           <Button variant="ghost" size="icon" onClick={() => navigate("/")}>
             <ArrowLeft className="w-4 h-4" />
           </Button>
-          <h1 className="text-sm font-bold tracking-wide uppercase text-muted-foreground">
+          <h1 className="text-sm font-bold tracking-wide uppercase text-gradient">
             Image Generator
           </h1>
         </div>
 
         {/* Generation form */}
-        <div className="p-4 space-y-3 border-b border-border glass-subtle">
+        <div className="p-4 space-y-3 border-b border-border/30 glass-subtle">
           <div>
             <label className="text-xs text-muted-foreground mb-1 block">Prompt</label>
             <Input
@@ -155,7 +155,7 @@ export default function ImageGenPage() {
               onChange={(e) => setPrompt(e.target.value)}
               placeholder="A futuristic city at sunset..."
               disabled={loading}
-              className="bg-secondary border-border rounded-xl"
+              className="glass-input border-border/30 rounded-xl"
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
@@ -169,7 +169,7 @@ export default function ImageGenPage() {
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">Style</label>
               <Select value={style} onValueChange={setStyle}>
-                <SelectTrigger className="bg-secondary border-border text-xs rounded-xl">
+                <SelectTrigger className="glass-input border-border/30 text-xs rounded-xl">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -187,7 +187,7 @@ export default function ImageGenPage() {
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">Ratio</label>
               <Select value={aspectRatio} onValueChange={setAspectRatio}>
-                <SelectTrigger className="bg-secondary border-border text-xs rounded-xl">
+                <SelectTrigger className="glass-input border-border/30 text-xs rounded-xl">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -204,7 +204,7 @@ export default function ImageGenPage() {
           <Button
             onClick={handleGenerate}
             disabled={loading || !prompt.trim()}
-            className="w-full gap-2 rounded-xl"
+            className="w-full gap-2 rounded-xl elevation-glow active:translate-y-[1px] transition-all"
           >
             {loading ? (
               <>

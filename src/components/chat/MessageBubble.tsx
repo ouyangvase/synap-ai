@@ -26,21 +26,21 @@ export function MessageBubble({ message, isStreaming }: Props) {
   if (!message.content && !isStreaming) return null;
 
   return (
-    <div className={cn("flex gap-3 px-2 py-3 max-w-3xl mx-auto", isUser && "flex-row-reverse")}>
+    <div className={cn("flex gap-3 px-2 py-3 max-w-3xl mx-auto animate-slide-up", isUser && "flex-row-reverse")}>
       <div
         className={cn(
-          "w-7 h-7 rounded-xl flex items-center justify-center shrink-0 mt-0.5",
-          isUser ? "bg-secondary" : "bg-primary/10"
+          "w-7 h-7 rounded-xl flex items-center justify-center shrink-0 mt-0.5 transition-all",
+          isUser ? "glass elevation-1" : "bg-primary/10 glow-dot-primary"
         )}
       >
         {isUser ? <User className="w-3.5 h-3.5 text-muted-foreground" /> : <Bot className="w-3.5 h-3.5 text-primary" />}
       </div>
       <div
         className={cn(
-          "rounded-2xl px-4 py-2.5 text-sm leading-relaxed max-w-[85%]",
+          "rounded-2xl px-4 py-2.5 text-sm leading-relaxed max-w-[85%] transition-all",
           isUser
-            ? "bg-primary text-primary-foreground elevation-1"
-            : "glass elevation-1"
+            ? "bg-primary text-primary-foreground elevation-2 depth-shadow"
+            : "glass-card glass-highlight"
         )}
       >
         {message.content ? (

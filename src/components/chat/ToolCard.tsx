@@ -146,7 +146,7 @@ export function ToolCard({ toolRun, conversationId, onTakeOver, onResume }: Prop
       const utcHours = (hours - 8 + 24) % 24;
       const cronSchedule = `${minutes} ${utcHours} * * *`;
 
-      await supabase.from("jobs").insert({
+      await (supabase as any).from("jobs").insert({
         name: jobName.trim(),
         description: `Browser flow saved from chat: ${url}`,
         schedule: cronSchedule,

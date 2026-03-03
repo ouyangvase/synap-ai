@@ -165,7 +165,7 @@ export default function VerifiedSearchPage() {
   const handleSaveAsJob = async () => {
     if (!user || !query.trim()) return;
     try {
-      const { error } = await supabase.from("jobs").insert({
+      const { error } = await (supabase as any).from("jobs").insert({
         user_id: user.id,
         name: `Search: ${query.trim().substring(0, 50)}`,
         description: `Automated web search for: ${query.trim()}`,
@@ -190,9 +190,9 @@ export default function VerifiedSearchPage() {
   return (
     <div className="flex h-screen bg-background overflow-hidden">
       {/* Left panel: Search & History */}
-      <div className="w-80 border-r border-border glass-subtle flex flex-col">
+      <div className="w-80 border-r border-border/30 glass-strong flex flex-col">
         {/* Header */}
-        <div className="p-4 border-b border-border glass-subtle">
+        <div className="p-4 border-b border-border/30 glass-subtle">
           <div className="flex items-center gap-2">
             <Button
               variant="ghost"
@@ -203,7 +203,7 @@ export default function VerifiedSearchPage() {
               <ArrowLeft className="w-4 h-4" />
             </Button>
             <div>
-              <h1 className="text-sm font-semibold">Verified Search</h1>
+              <h1 className="text-sm font-semibold text-gradient">Verified Search</h1>
               <p className="text-xs text-muted-foreground">
                 Real results, verified links
               </p>

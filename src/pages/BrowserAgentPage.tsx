@@ -229,12 +229,12 @@ export default function BrowserAgentPage() {
   return (
     <div className="flex h-screen bg-background text-foreground overflow-hidden">
       {/* Left: Controls + Timeline */}
-      <div className="w-80 border-r border-border glass-subtle flex flex-col">
-        <div className="p-4 border-b border-border glass-subtle flex items-center gap-2">
+      <div className="w-80 border-r border-border/30 glass-strong flex flex-col">
+        <div className="p-4 border-b border-border/30 glass-subtle flex items-center gap-2">
           <Button variant="ghost" size="icon" onClick={() => navigate("/")}>
             <ArrowLeft className="w-4 h-4" />
           </Button>
-          <h1 className="text-sm font-bold tracking-wide uppercase text-muted-foreground">Browser Agent</h1>
+          <h1 className="text-sm font-bold tracking-wide uppercase text-gradient">Browser Agent</h1>
         </div>
 
         <SessionControls
@@ -250,13 +250,13 @@ export default function BrowserAgentPage() {
           onConfirmLogin={confirmLogin}
         />
 
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto scrollbar-thin">
           <ActionTimeline actions={actions} />
         </div>
       </div>
 
       {/* Center: Browser View */}
-      <div className="flex-1 flex flex-col">
+      <div className="flex-1 flex flex-col border-x border-border/10">
         <BrowserViewer
           session={session}
           screenshotUrl={screenshotUrl}
@@ -265,7 +265,7 @@ export default function BrowserAgentPage() {
       </div>
 
       {/* Right: Task Panel */}
-      <div className="w-96 border-l border-border glass-subtle flex flex-col">
+      <div className="w-96 border-l border-border/30 glass-strong flex flex-col">
         <TaskPanel
           session={session}
           onSubmitTask={submitTask}
