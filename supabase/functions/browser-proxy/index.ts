@@ -966,9 +966,14 @@ Deno.serve(async (req) => {
           };
         });
 
-        // Detect failures in step results
+        // Detect failures/warnings in step results
         const failedSteps = rawStepResults.filter((s: string) => s.startsWith("FAIL"));
         const hasFailures = failedSteps.length > 0;
+        const hasBlockingWarning = rawStepResults.some((s: string) =>
+          s.toLowerCase().includes("login form detected") ||
+          s.toLowerCase().includes("manual intervention")
+        );
+        const needsAttention = hasFailures || hasBlockingWarning;
 
         // ── Upload screenshot to Supabase Storage ──
         let screenshotUrl: string | null = null;
@@ -986,19 +991,29 @@ Deno.serve(async (req) => {
         // The LLM uses this to form its response — false claims here = false claims to user.
         let markdown = "";
 
-        if (hasFailures) {
+        if (needsAttention) {
           const firstFailed = structuredSteps.find(s => s.status === "failed");
-          const failedAt = firstFailed ? `step ${firstFailed.step} (${firstFailed.action})` : "unknown step";
-          const failedError = firstFailed?.error || "unknown error";
-          markdown += `# TASK FAILED at ${failedAt}\n\n`;
-          markdown += `**Error:** ${failedError}\n\n`;
+          const failedAt = firstFailed ? `step ${firstFailed.step} (${firstFailed.action})` : hasBlockingWarning ? "post-login verification" : "unknown step";
+          const failedError = firstFailed?.error || (hasBlockingWarning ? "Login/session state is still unresolved" : "unknown error");
+          markdown += `# TASK NEEDS ATTENTION at ${failedAt}\n\n`;
+          markdown += `**Issue:** ${failedError}\n\n`;
           markdown += `Final URL: ${pageUrl}\n\n`;
-          markdown += `## Steps Failed (${failedSteps.length})\n`;
-          markdown += `The following steps failed. Use the DOM hints (AVAILABLE_INPUTS / AVAILABLE_BUTTONS) to construct corrected actions:\n\n`;
-          failedSteps.forEach((s: string, i: number) => {
-            markdown += `${i + 1}. ${s}\n`;
-          });
-          markdown += `\n**DO NOT ask the user for selectors.** Use the available elements listed above to retry with corrected parameters.\n`;
+          if (failedSteps.length > 0) {
+            markdown += `## Steps Failed (${failedSteps.length})\n`;
+            markdown += `The following steps failed. Use the DOM hints (AVAILABLE_INPUTS / AVAILABLE_BUTTONS) to construct corrected actions:\n\n`;
+            failedSteps.forEach((s: string, i: number) => {
+              markdown += `${i + 1}. ${s}\n`;
+            });
+          }
+          if (hasBlockingWarning) {
+            markdown += `\n## Blocking warnings\n`;
+            rawStepResults
+              .filter((s: string) => s.toLowerCase().includes("login form detected") || s.toLowerCase().includes("manual intervention"))
+              .forEach((s: string, i: number) => {
+                markdown += `${i + 1}. ${s}\n`;
+              });
+          }
+          markdown += `\n**DO NOT ask the user for selectors.** Use available elements and retry with corrected parameters.\n`;
           if (screenshotUrl) {
             markdown += `\nError screenshot: ${screenshotUrl}\n`;
           }
@@ -1037,7 +1052,7 @@ Deno.serve(async (req) => {
         // outcome_status: "completed" only if verification passed or no failures and no verification needed
         const outcomeStatus = hasVerification
           ? (verificationPassed ? "completed" : "needs_attention")
-          : (hasFailures ? "needs_attention" : "completed");
+          : (needsAttention ? "needs_attention" : "completed");
 
         // ── Upload screenshot to Supabase Storage for persistent URL ──
         let persistentScreenshotUrl: string | null = null;
@@ -1056,8 +1071,8 @@ Deno.serve(async (req) => {
         const lastStepName = lastSuccessIndex >= 0 ? structuredSteps[lastSuccessIndex].action : null;
 
         return jsonResp({
-          success: !hasFailures,
-          has_failures: hasFailures,
+          success: !needsAttention,
+          has_failures: needsAttention,
           failed_step_count: failedSteps.length,
           title: pageTitle,
           url: pageUrl,
@@ -2128,8 +2143,8 @@ function buildCompositeScript(
 
     // Common params (JSON-escaped for safety inside generated code)
     const selector = JSON.stringify((step.selector as string) || "body");
-    const text = JSON.stringify((step.text as string) || "");
-    const value = JSON.stringify((step.value as string) || "");
+    const text = JSON.stringify(((step.text as string) ?? (step.value as string) ?? ""));
+    const value = JSON.stringify(((step.value as string) ?? (step.text as string) ?? ""));
     const url = JSON.stringify((step.url as string) || "");
     const ms = Number(step.ms) || 2000;
     const direction = (step.direction as string) || "down";
@@ -2235,7 +2250,7 @@ function buildCompositeScript(
       case "click_by_text":
         stepCode.push(`
           try {
-            const txt = ${JSON.stringify((step.text as string) || "")};
+            const txt = ${JSON.stringify(((step.text as string) || (step.value as string) || ""))};
             const clicked = await helpers.clickByText(page, txt);
             if (clicked) {
               await new Promise(r => setTimeout(r, 1000));
@@ -2325,7 +2340,7 @@ function buildCompositeScript(
       case "wait_for_url":
         stepCode.push(`
           try {
-            const fragment = ${JSON.stringify((step.text as string) || "")};
+            const fragment = ${JSON.stringify(((step.text as string) || (step.value as string) || ""))};
             const timeout = ${Number(step.timeout) || 10000};
             await helpers.waitForUrl(page, fragment, timeout);
             stepResults.push("URL now contains \\"" + fragment + "\\"");
@@ -2336,7 +2351,7 @@ function buildCompositeScript(
       case "wait_for_text":
         stepCode.push(`
           try {
-            const txt = ${JSON.stringify((step.text as string) || "")};
+            const txt = ${JSON.stringify(((step.text as string) || (step.value as string) || ""))};
             const timeout = ${Number(step.timeout) || 10000};
             await helpers.waitForText(page, txt, timeout);
             stepResults.push("Text \\"" + txt + "\\" is now visible");
@@ -2417,6 +2432,7 @@ function buildCompositeScript(
         `);
         break;
 
+      case "fill":
       case "type":
         stepCode.push(`
           try {
@@ -2424,7 +2440,7 @@ function buildCompositeScript(
             ${step.clear ? `await page.click(${selector}, { clickCount: 3 }); await page.keyboard.press("Backspace");` : ""}
             await page.type(${selector}, ${text}, { delay: 50 });
             stepResults.push("Typed into " + ${selector});
-          } catch(e) { stepResults.push("Type failed on " + ${selector} + ": " + e.message); }
+          } catch(e) { stepResults.push("FAIL type [" + ${selector} + "] " + e.message); }
         `);
         break;
 
@@ -2952,7 +2968,7 @@ function buildCompositeScript(
         break;
 
       default:
-        stepCode.push(`stepResults.push("Unknown action: ${action}");`);
+        stepCode.push(`stepResults.push("FAIL unknown_action: ${action}");`);
     }
   }
 
