@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   Send, Bot, Plus, Monitor, X, Image as ImageIcon, Globe,
-  Hand, Play, Loader2, RefreshCw, Brain, ListChecks, Check
+  Hand, Play, Loader2, RefreshCw, Brain, ListChecks, Check, Pause, Square
 } from "lucide-react";
 import { ToolCard } from "./ToolCard";
 import { MessageBubble } from "./MessageBubble";
@@ -48,6 +48,7 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
   const [toolRuns, setToolRuns] = useState<ToolRun[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
   const [streamingContent, setStreamingContent] = useState("");
   const [latestScreenshot, setLatestScreenshot] = useState<string | null>(null);
   const [screenshots, setScreenshots] = useState<{ data: string; url: string; title: string; time: string }[]>([]);
@@ -223,6 +224,8 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
     try {
       const CHAT_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/chat`;
       const { data: { session } } = await supabase.auth.getSession();
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
       const resp = await fetch(CHAT_URL, {
         method: "POST",
         headers: {
@@ -231,6 +234,7 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
           apikey: import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY,
         },
         body: JSON.stringify({ conversation_id: conversationId, plan_mode: planMode }),
+        signal: controller.signal,
       });
 
       if (!resp.ok) {
@@ -296,12 +300,23 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
       await fetchMessages();
       await fetchToolRuns();
     } catch (err: any) {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+      if (err.name === "AbortError") {
+        toast({ title: "Paused", description: "Execution paused by user." });
+      } else {
+        toast({ title: "Error", description: err.message, variant: "destructive" });
+      }
     } finally {
+      abortControllerRef.current = null;
       setIsStreaming(false);
       setStreamingContent("");
       setThinkingMessage(null);
     }
+  };
+
+  const handlePauseExecution = () => {
+    abortControllerRef.current?.abort();
+    setTakeOverMode(true);
+    toast({ title: "Execution Paused", description: "The agent has been paused. Click Resume to continue." });
   };
 
   const handleSend = async () => {
@@ -374,6 +389,11 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
               )}
             </div>
             <div className="flex items-center gap-2">
+              {!takeOverMode && (isStreaming || hasRunningBrowserTool) && (
+                <Button variant="outline" size="sm" onClick={handlePauseExecution} className="h-7 text-xs gap-1 rounded-xl border-destructive/30 text-destructive hover:bg-destructive/10">
+                  <Pause className="w-3 h-3" /> Pause
+                </Button>
+              )}
               {!takeOverMode && hasRunningBrowserTool && (
                 <Button variant="outline" size="sm" onClick={handleTakeOver} className="h-7 text-xs gap-1 rounded-xl border-amber-500/30 text-amber-600 hover:bg-amber-500/10">
                   <Hand className="w-3 h-3" /> Take Over
@@ -490,9 +510,15 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
               disabled={isStreaming}
               className="flex-1 glass-input border-border/30 rounded-2xl h-11"
             />
-            <Button type="submit" size="icon" disabled={isStreaming || !input.trim()} className="rounded-2xl h-11 w-11 shrink-0 elevation-glow active:translate-y-[1px] transition-all">
-              <Send className="w-4 h-4" />
-            </Button>
+            {isStreaming ? (
+              <Button type="button" size="icon" onClick={handlePauseExecution} className="rounded-2xl h-11 w-11 shrink-0 bg-destructive hover:bg-destructive/90 active:translate-y-[1px] transition-all" title="Pause execution">
+                <Square className="w-4 h-4" />
+              </Button>
+            ) : (
+              <Button type="submit" size="icon" disabled={!input.trim()} className="rounded-2xl h-11 w-11 shrink-0 elevation-glow active:translate-y-[1px] transition-all">
+                <Send className="w-4 h-4" />
+              </Button>
+            )}
           </form>
           {planMode && (
             <div className="max-w-3xl mx-auto mt-1.5 px-1">
