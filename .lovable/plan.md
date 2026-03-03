@@ -1,114 +1,93 @@
 
 
-# Full 3D Glassy UI/UX Redesign + Build Error Fixes
+# Plan: Add Plan Mode, Self-Thinking, and Browser Task Execution
 
-This plan covers two parts: fixing the existing build errors, then applying a comprehensive visual redesign across all pages and components.
+## Overview
 
----
-
-## Part 1: Fix Build Errors
-
-### browser-proxy/index.ts
-- **Duplicate `screenshotUrl`** at lines ~974 and ~1043: Remove the second declaration and its `uploadScreenshot` call (which also passes wrong args). The first one already handles uploading correctly.
-- **`uploadScreenshot` signature mismatch** at line 1046: The function requires 4 args (`base64, conversationId, stepIndex, label`) but is called with 2. Removing the duplicate block fixes this.
-
-### jobs-run/index.ts
-- **Type errors with `execution_state` table**: All Supabase calls to `execution_state` fail because the types file does not include it. Fix by casting with `(supabase as any)` consistently (same pattern already used for `jobs` and `job_runs` tables).
+Add three capabilities to the AI agent: (1) a visible "thinking/reasoning" phase where the model shows its chain-of-thought, (2) a "Plan Mode" where the agent creates a step-by-step plan before executing, and (3) wiring the browser automation tool (`browser_do`) into the chat agent so it can complete tasks end-to-end.
 
 ---
 
-## Part 2: 3D Glassy UI/UX Redesign
+## Problem: Missing GEMINI_API_KEY
 
-### Design System Updates
+The chat edge function calls `Deno.env.get("GEMINI_API_KEY")` but this secret doesn't exist. Only `BROWSER_SERVICE_URL` and `LOVABLE_API_KEY` are configured. We need to either:
+- Add the Gemini API key as a secret, OR
+- Switch to the Lovable AI Gateway (which uses `LOVABLE_API_KEY` already available)
 
-**`src/index.css`** — Enhanced glass and 3D effects:
-- Add new CSS utilities: `.glass-card` with stronger blur, 3D transform on hover (`perspective`, `rotateX/Y`), inner glow borders
-- Add `.float-animation` keyframe for subtle floating effect
-- Add `.glow-border` with animated gradient border
-- Add `.depth-shadow` with layered box-shadows for 3D depth
-- Enhanced scrollbar styling with glass effect
-- Add `.glass-input` for frosted input fields
-- Add gradient text utility `.text-gradient`
+**Recommendation**: Switch to Lovable AI Gateway (`https://ai.gateway.lovable.dev/v1/chat/completions`) using the existing `LOVABLE_API_KEY`. This avoids needing a separate Gemini key and uses `google/gemini-3-flash-preview` by default.
 
-**`tailwind.config.ts`** — New animations and colors:
-- Add `float`, `glow-pulse`, `slide-up`, `blur-in` keyframes
-- Add glass-specific color tokens
+---
 
-### Component-Level Changes
+## Changes
 
-**Sidebar (`ConversationSidebar.tsx`)**:
-- Full glass background with stronger backdrop blur
-- Logo gets a subtle glow ring animation
-- Nav buttons get 3D hover transform (`translateY(-2px)` + shadow lift)
-- Conversation items get glass card treatment with hover depth effect
-- Active conversation gets glowing left border accent
-- User email section gets frosted glass footer
+### 1. Chat Edge Function (`supabase/functions/chat/index.ts`)
 
-**Chat (`ChatPane.tsx`, `MessageBubble.tsx`)**:
-- Message bubbles get glass treatment with depth shadows
-- User messages: gradient background (primary to accent) with 3D pop
-- Bot messages: frosted glass with subtle inner glow
-- Input bar: floating glass bar with glow-on-focus, rounded-2xl
-- Typing indicator: 3D bouncing dots
+**Switch to Lovable AI Gateway:**
+- Replace `generativelanguage.googleapis.com` calls with `https://ai.gateway.lovable.dev/v1/chat/completions`
+- Use `LOVABLE_API_KEY` for auth instead of `GEMINI_API_KEY`
+- Set model to `google/gemini-2.5-flash` (fast + good reasoning)
 
-**Auth Page (`AuthPage.tsx`)**:
-- Animated gradient background (slow-moving mesh gradient)
-- Login card: strong glass effect with 3D perspective tilt on hover
-- Logo: floating animation with glow ring
-- Inputs: glass-input style with glow focus rings
-- Button: gradient with 3D press effect (translateY on active)
+**Add Plan Mode logic:**
+- Detect `[PLAN]` prefix in user messages or a `plan_mode: true` flag
+- When plan mode is active, prepend a system instruction: "First create a numbered step-by-step plan. Present the plan to the user. Wait for approval before executing."
+- After the user approves (sends "go ahead", "approved", etc.), the agent executes each plan step sequentially, emitting thinking events between steps
 
-**Browser Agent (`BrowserAgentPage.tsx`, `SessionControls.tsx`)**:
-- Three-panel layout gets glass dividers instead of solid borders
-- Session control buttons: 3D elevated glass buttons
-- Action timeline: glass cards with depth, status dots get glow
-- Browser viewer: glass frame with inner shadow depth
+**Enhanced thinking events:**
+- Emit structured `{ type: "thinking", message, phase }` SSE events with phases: `planning`, `reasoning`, `executing`, `verifying`
+- Include the agent's internal reasoning in the thinking stream
 
-**Image Generator (`ImageGenPage.tsx`)**:
-- Left panel: glass sidebar with frosted controls
-- Image preview area: glass frame with 3D floating effect on the image
-- History thumbnails: glass cards with hover lift
-- Generate button: gradient glow with pulse animation while loading
+**Add `browser_do` tool definition:**
+- Create a new tool record for `browser_do` that calls the `browser-proxy` edge function
+- The tool accepts `{ url, steps: [{ action, selector, value }] }` and returns screenshots + results
 
-**Jobs Page (`JobsPage.tsx`)**:
-- Job list items: glass cards with 3D hover lift
-- Status badges: glowing variants (green glow for success, red for failed)
-- Tab navigation: glass pill tabs
-- Execution timeline: glass step cards with connecting gradient lines
+### 2. Add `browser_do` Tool to Database
 
-**Verified Search (`VerifiedSearchPage.tsx`)**:
-- Search input: glass with glow focus
-- Result cards: glass with 3D hover transform
-- Progress steps: glass timeline with animated gradient connectors
-- Verified badges: green glow effect
+- Insert a `browser_do` tool into `tools` table with proper schema
+- Insert a `tool_endpoint` pointing to `{SUPABASE_URL}/functions/v1/browser-proxy/action`
+- Link it to the MuleRun Agent via `agent_tools`
 
-**404 Page (`NotFound.tsx`)**:
-- Floating glass card with 3D tilt
-- Large "404" with gradient text and glow
-- Animated background particles (CSS-only, using pseudo-elements)
+### 3. System Prompt Enhancement (`agents` table update)
 
-### Shared UI Components
+Update the agent's system prompt to include:
+- Plan mode instructions: "When given a complex task, first create a plan with numbered steps. Show the plan, then execute step by step."
+- Thinking instructions: "Think through each step carefully. When using browser_do, describe what you're about to do and why."
+- Browser capabilities: "You can use browser_do to navigate websites, click buttons, fill forms, and extract data."
 
-**`button.tsx`**: Add glass variant with backdrop-blur, 3D active press (`translateY(1px)`)
-**`card.tsx`**: Default glass treatment, 3D hover transform
-**`input.tsx`**: Glass background, glow focus ring, subtle inner shadow
-**`badge.tsx`**: Glass variant with glow colors
+### 4. ChatPane UI (`src/components/chat/ChatPane.tsx`)
 
-### Files to Modify (16 files)
-1. `src/index.css` — New glass/3D utilities
-2. `tailwind.config.ts` — New animations
-3. `src/pages/AuthPage.tsx` — Glass login with animated bg
-4. `src/pages/ChatPage.tsx` — Glass layout
-5. `src/pages/BrowserAgentPage.tsx` — Glass panels
-6. `src/pages/ImageGenPage.tsx` — Glass controls + preview
-7. `src/pages/JobsPage.tsx` — Glass cards + tabs
-8. `src/pages/VerifiedSearchPage.tsx` — Glass search + results
-9. `src/pages/NotFound.tsx` — 3D floating 404
-10. `src/components/chat/ConversationSidebar.tsx` — Glass sidebar
-11. `src/components/chat/MessageBubble.tsx` — 3D glass bubbles
-12. `src/components/chat/ChatPane.tsx` — Glass input bar
-13. `src/components/browser/SessionControls.tsx` — Glass buttons
-14. `src/components/ui/button.tsx` — Glass variant
-15. `supabase/functions/browser-proxy/index.ts` — Fix duplicate var
-16. `supabase/functions/jobs-run/index.ts` — Fix type errors
+**Plan Mode toggle:**
+- Add a "Plan" toggle button next to the send button
+- When enabled, prefix messages with `[PLAN]` metadata
+- Show a visual indicator when the agent is in planning mode
+
+**Enhanced thinking display:**
+- Show a collapsible "Thinking" section with the agent's reasoning
+- Different icons for phases: lightbulb (planning), brain (reasoning), cog (executing), check (verifying)
+- Animate transitions between thinking phases
+
+**Plan approval UI:**
+- When the agent presents a plan, show "Approve" / "Edit Plan" buttons
+- Clicking "Approve" sends a confirmation message to continue execution
+
+### 5. MessageBubble Enhancement (`src/components/chat/MessageBubble.tsx`)
+
+- Detect plan-formatted messages (numbered lists) and render them with checkmarks as steps complete
+- Add a distinct visual style for "plan" messages (glass card with step indicators)
+
+### 6. New ThinkingPanel Component (`src/components/chat/ThinkingPanel.tsx`)
+
+- Collapsible panel showing the agent's chain-of-thought
+- Renders thinking steps with timestamps
+- Shows current phase with animated indicator
+- Persists thinking history for the conversation
+
+---
+
+## Files to Modify/Create
+
+1. `supabase/functions/chat/index.ts` — Switch to Lovable AI Gateway, add plan mode logic, enhanced thinking
+2. `src/components/chat/ChatPane.tsx` — Plan mode toggle, thinking display, plan approval UI
+3. `src/components/chat/MessageBubble.tsx` — Plan message rendering with step tracking
+4. `src/components/chat/ThinkingPanel.tsx` — New component for reasoning display
+5. Database migration — Add `browser_do` tool, endpoint, agent link; update system prompt
 
