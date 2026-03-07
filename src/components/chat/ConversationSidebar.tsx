@@ -3,7 +3,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Plus, MessageSquare, LogOut, X, Monitor, Calendar, Trash2, Sparkles, Search, Pencil, Check } from "lucide-react";
+import { Plus, MessageSquare, LogOut, X, Monitor, Calendar, Trash2, Sparkles, Search, Pencil, Check, Megaphone } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { formatDistanceToNow } from "date-fns";
@@ -115,6 +115,7 @@ export function ConversationSidebar({ activeId, onSelect, onNew, open, onClose }
           { icon: Sparkles, label: "Image Generator", path: "/images" },
           { icon: Calendar, label: "Jobs & Automation", path: "/jobs" },
           { icon: Search, label: "Verified Search", path: "/search" },
+          { icon: Megaphone, label: "Meta Ads Hub", path: "/meta-ads" },
         ].map((item) => (
           <Button
             key={item.path}
