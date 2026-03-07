@@ -1,13 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
+import { Area, AreaChart, Bar, BarChart, Line, LineChart, XAxis, YAxis, CartesianGrid } from "recharts";
 import { supabase } from "@/integrations/supabase/client";
 import type { AdAccount } from "@/hooks/useMetaAccounts";
-import { BarChart3, Download } from "lucide-react";
+import { BarChart3 } from "lucide-react";
 
 interface Props { adAccount: AdAccount | null; }
 
@@ -25,6 +27,10 @@ function getDateRange(preset: DatePreset): { start: string; end: string } {
     default: return { start: fmt(now), end: fmt(now) };
   }
 }
+
+const spendConfig = { spend: { label: "Spend", color: "hsl(var(--primary))" } };
+const impressionsConfig = { impressions: { label: "Impressions", color: "hsl(var(--accent))" } };
+const ctrConfig = { ctr: { label: "CTR %", color: "hsl(142 76% 36%)" } };
 
 export function MetaReportsTab({ adAccount }: Props) {
   const [datePreset, setDatePreset] = useState<DatePreset>("last_7d");
@@ -46,9 +52,19 @@ export function MetaReportsTab({ adAccount }: Props) {
       .eq("ad_account_id", adAccount.id)
       .gte("date_start", range.start)
       .lte("date_stop", range.end)
-      .order("date_start", { ascending: false });
+      .order("date_start", { ascending: true });
     setInsights(data || []);
   };
+
+  const chartData = useMemo(() =>
+    insights.map(r => ({
+      date: r.date_start,
+      spend: Number(r.spend || 0),
+      impressions: Number(r.impressions || 0),
+      ctr: Number(r.ctr || 0),
+      clicks: Number(r.clicks || 0),
+    })),
+  [insights]);
 
   const totals = insights.reduce((acc, r) => ({
     impressions: acc.impressions + Number(r.impressions || 0),
@@ -115,6 +131,59 @@ export function MetaReportsTab({ adAccount }: Props) {
           </Card>
         ))}
       </div>
+
+      {/* Charts */}
+      {chartData.length > 1 && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          {/* Spend Area Chart */}
+          <Card>
+            <CardHeader className="pb-2"><CardTitle className="text-sm">Spend Trend</CardTitle></CardHeader>
+            <CardContent className="p-2">
+              <ChartContainer config={spendConfig} className="h-[200px] w-full">
+                <AreaChart data={chartData}>
+                  <CartesianGrid strokeDasharray="3 3" className="stroke-border/30" />
+                  <XAxis dataKey="date" tick={{ fontSize: 10 }} tickFormatter={v => v.slice(5)} />
+                  <YAxis tick={{ fontSize: 10 }} tickFormatter={v => `$${v}`} />
+                  <ChartTooltip content={<ChartTooltipContent />} />
+                  <Area type="monotone" dataKey="spend" fill="var(--color-spend)" fillOpacity={0.2} stroke="var(--color-spend)" strokeWidth={2} />
+                </AreaChart>
+              </ChartContainer>
+            </CardContent>
+          </Card>
+
+          {/* Impressions Bar Chart */}
+          <Card>
+            <CardHeader className="pb-2"><CardTitle className="text-sm">Impressions</CardTitle></CardHeader>
+            <CardContent className="p-2">
+              <ChartContainer config={impressionsConfig} className="h-[200px] w-full">
+                <BarChart data={chartData}>
+                  <CartesianGrid strokeDasharray="3 3" className="stroke-border/30" />
+                  <XAxis dataKey="date" tick={{ fontSize: 10 }} tickFormatter={v => v.slice(5)} />
+                  <YAxis tick={{ fontSize: 10 }} />
+                  <ChartTooltip content={<ChartTooltipContent />} />
+                  <Bar dataKey="impressions" fill="var(--color-impressions)" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ChartContainer>
+            </CardContent>
+          </Card>
+
+          {/* CTR Line Chart */}
+          <Card>
+            <CardHeader className="pb-2"><CardTitle className="text-sm">CTR %</CardTitle></CardHeader>
+            <CardContent className="p-2">
+              <ChartContainer config={ctrConfig} className="h-[200px] w-full">
+                <LineChart data={chartData}>
+                  <CartesianGrid strokeDasharray="3 3" className="stroke-border/30" />
+                  <XAxis dataKey="date" tick={{ fontSize: 10 }} tickFormatter={v => v.slice(5)} />
+                  <YAxis tick={{ fontSize: 10 }} tickFormatter={v => `${v}%`} />
+                  <ChartTooltip content={<ChartTooltipContent />} />
+                  <Line type="monotone" dataKey="ctr" stroke="var(--color-ctr)" strokeWidth={2} dot={{ r: 3 }} />
+                </LineChart>
+              </ChartContainer>
+            </CardContent>
+          </Card>
+        </div>
+      )}
 
       {/* Detail Table */}
       <Card>
