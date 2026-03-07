@@ -26,3 +26,6 @@ verify_jwt = false
 
 [functions.links-demo]
 verify_jwt = false
+
+[functions.meta-api]
+verify_jwt = false
