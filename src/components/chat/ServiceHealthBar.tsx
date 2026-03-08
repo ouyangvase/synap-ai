@@ -86,6 +86,8 @@ export function ServiceHealthBar() {
 
   const allOnline = services.every((s) => s.status === "online");
   const anyOffline = services.some((s) => s.status === "offline");
+  const anyDegraded = services.some((s) => s.status === "degraded");
+  const anyChecking = services.some((s) => s.status === "checking");
 
   return (
     <TooltipProvider>
