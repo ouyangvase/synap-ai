@@ -35,13 +35,14 @@ export function ServiceHealthBar() {
         signal: AbortSignal.timeout(5000),
       });
 
-      results.push({
-        name: "browser",
-        status: resp.ok ? "online" : resp.status === 503 ? "offline" : "degraded",
-        label: "Browser",
-      });
+      if (resp.ok) {
+        results.push({ name: "browser", status: "online", label: "Browser" });
+      } else {
+        // 502/503 = degraded (service exists but upstream issue), not a crash
+        results.push({ name: "browser", status: "degraded", label: "Browser" });
+      }
     } catch {
-      results.push({ name: "browser", status: "offline", label: "Browser" });
+      results.push({ name: "browser", status: "degraded", label: "Browser" });
     }
 
     try {
