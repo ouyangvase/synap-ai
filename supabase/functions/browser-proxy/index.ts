@@ -536,34 +536,35 @@ Deno.serve(async (req) => {
   // ──────────────────────────────────────────────
   if (path === "/health" && req.method === "GET") {
     if (!rawUrl) {
-      return jsonResp(
-        { status: "error", detail: "BROWSER_SERVICE_URL not configured" },
-        503,
-      );
+      return jsonResp({
+        status: "degraded",
+        detail: "BROWSER_SERVICE_URL not configured",
+      });
     }
+
     let browserless: ReturnType<typeof parseBrowserlessUrl>;
     try {
       browserless = parseBrowserlessUrl(rawUrl);
     } catch {
-      return jsonResp(
-        { status: "error", detail: "Invalid BROWSER_SERVICE_URL" },
-        500,
-      );
+      return jsonResp({
+        status: "degraded",
+        detail: "Invalid BROWSER_SERVICE_URL",
+      });
     }
+
     try {
       const versionUrl = `${browserless.baseUrl}/json/version?token=${browserless.token}`;
       const resp = await fetchWithTimeout(versionUrl, { timeout: 10_000 });
+
       if (!resp.ok) {
         const body = await resp.text();
-        return jsonResp(
-          {
-            status: "degraded",
-            browserless_status: resp.status,
-            detail: body.slice(0, 500),
-          },
-          200,
-        );
+        return jsonResp({
+          status: "degraded",
+          browserless_status: resp.status,
+          detail: body.slice(0, 500),
+        });
       }
+
       const versionInfo = await resp.json();
       return jsonResp({
         status: "ok",
@@ -574,10 +575,10 @@ Deno.serve(async (req) => {
         },
       });
     } catch (err) {
-      return jsonResp(
-        { status: "error", detail: `Browserless unreachable: ${String(err)}` },
-        502,
-      );
+      return jsonResp({
+        status: "degraded",
+        detail: `Browserless unreachable: ${String(err)}`,
+      });
     }
   }
 
