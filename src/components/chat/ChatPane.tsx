@@ -320,10 +320,12 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
         return streamResponse(true);
       }
     } catch (err: any) {
-      if (err.name === "AbortError") {
+      if (err?.name === "AbortError") {
         toast({ title: "Paused", description: "Execution paused by user." });
       } else {
-        toast({ title: "Error", description: err.message, variant: "destructive" });
+        const msg = err?.message || "Something went wrong";
+        console.error("Chat stream error:", msg);
+        toast({ title: "Error", description: msg, variant: "destructive" });
       }
     } finally {
       abortControllerRef.current = null;
