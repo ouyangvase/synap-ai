@@ -10,7 +10,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { useToast } from "@/hooks/use-toast";
 import { useMetaApi } from "@/hooks/useMetaApi";
 import type { MetaAccount, AdAccount } from "@/hooks/useMetaAccounts";
-import { Link2, Unlink, Plus, Shield, Clock, AlertTriangle, Download, RefreshCw } from "lucide-react";
+import { Link2, Unlink, Plus, Shield, Clock, AlertTriangle, Download, Trash2, Loader2, CheckCircle2, ExternalLink } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 
 interface Props {
@@ -23,49 +23,87 @@ export function MetaSettingsTab({ metaAccounts, adAccounts, onRefresh }: Props) 
   const { user } = useAuth();
   const { toast } = useToast();
   const metaApi = useMetaApi();
+
+  // Connect flow
   const [showConnect, setShowConnect] = useState(false);
+  const [connectStep, setConnectStep] = useState<"token" | "validating" | "confirmed">("token");
+  const [connectToken, setConnectToken] = useState("");
+  const [validatedUser, setValidatedUser] = useState<{ id: string; name: string } | null>(null);
+
+  // Add ad account
   const [showAddAd, setShowAddAd] = useState(false);
   const [selectedMeta, setSelectedMeta] = useState<string | null>(null);
-  const [connectForm, setConnectForm] = useState({ meta_user_id: "", meta_user_name: "", access_token: "" });
   const [adForm, setAdForm] = useState({ ad_account_id: "", ad_account_name: "", currency: "USD", timezone: "UTC" });
   const [fetchingAccounts, setFetchingAccounts] = useState(false);
   const [discoveredAccounts, setDiscoveredAccounts] = useState<any[]>([]);
   const [showDiscovered, setShowDiscovered] = useState(false);
 
-  const handleConnect = async () => {
-    if (!user) return;
+  // Reconnect
+  const [showReconnect, setShowReconnect] = useState(false);
+  const [reconnectId, setReconnectId] = useState<string | null>(null);
+  const [reconnectToken, setReconnectToken] = useState("");
+
+  // Delete meta account (double confirm)
+  const [showDeleteMeta, setShowDeleteMeta] = useState(false);
+  const [deleteMetaTarget, setDeleteMetaTarget] = useState<MetaAccount | null>(null);
+  const [deleteConfirmText, setDeleteConfirmText] = useState("");
+
+  // Delete individual ad account
+  const [showDeleteAd, setShowDeleteAd] = useState(false);
+  const [deleteAdTarget, setDeleteAdTarget] = useState<AdAccount | null>(null);
+
+  // ── Connect: validate token via edge function ──
+  const handleValidateToken = async () => {
+    if (!connectToken.trim()) return;
+    setConnectStep("validating");
+    try {
+      const { data, error } = await supabase.functions.invoke("meta-api", {
+        body: { action: "validate_token", params: { access_token: connectToken.trim() } },
+      });
+      if (error || data?.error) throw new Error(data?.error || error?.message || "Validation failed");
+      setValidatedUser({ id: data.id, name: data.name });
+      setConnectStep("confirmed");
+    } catch (err: any) {
+      toast({ title: "Token Invalid", description: err.message || "Could not validate token", variant: "destructive" });
+      setConnectStep("token");
+    }
+  };
+
+  const handleConnectConfirm = async () => {
+    if (!user || !validatedUser) return;
     const { error } = await supabase.from("connected_meta_accounts").insert({
       user_id: user.id,
-      meta_user_id: connectForm.meta_user_id,
-      meta_user_name: connectForm.meta_user_name,
-      access_token_encrypted: connectForm.access_token,
+      meta_user_id: validatedUser.id,
+      meta_user_name: validatedUser.name,
+      access_token_encrypted: connectToken.trim(),
       scopes: ["ads_read", "ads_management"],
       status: "active",
     });
     if (error) { toast({ title: "Error", description: error.message, variant: "destructive" }); return; }
     toast({ title: "Meta account connected" });
-    setShowConnect(false);
-    setConnectForm({ meta_user_id: "", meta_user_name: "", access_token: "" });
+    resetConnectDialog();
     onRefresh();
   };
 
+  const resetConnectDialog = () => {
+    setShowConnect(false);
+    setConnectStep("token");
+    setConnectToken("");
+    setValidatedUser(null);
+  };
+
+  // ── Fetch ad accounts ──
   const handleFetchAdAccounts = async (metaAccountId: string) => {
     setFetchingAccounts(true);
     setSelectedMeta(metaAccountId);
-    const res = await metaApi.call({
-      action: "get_ad_accounts",
-      meta_account_id: metaAccountId,
-      params: {},
-    });
+    const res = await metaApi.call({ action: "get_ad_accounts", meta_account_id: metaAccountId, params: {} });
     setFetchingAccounts(false);
-
     if (res.error?.toLowerCase().includes("disconnected")) {
       setReconnectId(metaAccountId);
       setReconnectToken("");
       setShowReconnect(true);
       return;
     }
-
     if (res.data?.data) {
       setDiscoveredAccounts(res.data.data);
       setShowDiscovered(true);
@@ -104,14 +142,11 @@ export function MetaSettingsTab({ metaAccounts, adAccounts, onRefresh }: Props) 
     onRefresh();
   };
 
+  // ── Disconnect / Reconnect ──
   const handleDisconnect = async (id: string) => {
     await supabase.from("connected_meta_accounts").update({ status: "disconnected" }).eq("id", id);
     toast({ title: "Account disconnected" }); onRefresh();
   };
-
-  const [showReconnect, setShowReconnect] = useState(false);
-  const [reconnectId, setReconnectId] = useState<string | null>(null);
-  const [reconnectToken, setReconnectToken] = useState("");
 
   const handleReconnect = (id: string) => {
     setReconnectId(id);
@@ -122,12 +157,43 @@ export function MetaSettingsTab({ metaAccounts, adAccounts, onRefresh }: Props) 
   const handleReconnectSubmit = async () => {
     if (!reconnectId) return;
     const updates: any = { status: "active" };
-    if (reconnectToken.trim()) {
-      updates.access_token_encrypted = reconnectToken.trim();
-    }
+    if (reconnectToken.trim()) updates.access_token_encrypted = reconnectToken.trim();
     await supabase.from("connected_meta_accounts").update(updates).eq("id", reconnectId);
     toast({ title: "Account reconnected" });
     setShowReconnect(false);
+    onRefresh();
+  };
+
+  // ── Delete meta account (double confirm) ──
+  const handleDeleteMetaStart = (ma: MetaAccount) => {
+    setDeleteMetaTarget(ma);
+    setDeleteConfirmText("");
+    setShowDeleteMeta(true);
+  };
+
+  const handleDeleteMetaConfirm = async () => {
+    if (!deleteMetaTarget) return;
+    // Delete linked ad accounts first
+    await supabase.from("connected_ad_accounts").delete().eq("meta_account_id", deleteMetaTarget.id);
+    await supabase.from("connected_meta_accounts").delete().eq("id", deleteMetaTarget.id);
+    toast({ title: "Account permanently deleted" });
+    setShowDeleteMeta(false);
+    setDeleteMetaTarget(null);
+    onRefresh();
+  };
+
+  // ── Delete individual ad account ──
+  const handleDeleteAdStart = (aa: AdAccount) => {
+    setDeleteAdTarget(aa);
+    setShowDeleteAd(true);
+  };
+
+  const handleDeleteAdConfirm = async () => {
+    if (!deleteAdTarget) return;
+    await supabase.from("connected_ad_accounts").delete().eq("id", deleteAdTarget.id);
+    toast({ title: "Ad account removed" });
+    setShowDeleteAd(false);
+    setDeleteAdTarget(null);
     onRefresh();
   };
 
@@ -135,6 +201,8 @@ export function MetaSettingsTab({ metaAccounts, adAccounts, onRefresh }: Props) 
     if (!expiresAt) return false;
     return new Date(expiresAt) < new Date();
   };
+
+  const deleteMetaName = deleteMetaTarget?.meta_user_name || deleteMetaTarget?.meta_user_id || "";
 
   return (
     <div className="space-y-6 max-w-3xl">
@@ -186,6 +254,9 @@ export function MetaSettingsTab({ metaAccounts, adAccounts, onRefresh }: Props) 
                   <div className="flex items-center gap-2">
                     <span className="text-muted-foreground">{aa.currency} • {aa.timezone}</span>
                     <Badge variant={aa.status === "active" ? "default" : "secondary"} className="text-xs">{aa.status}</Badge>
+                    <Button size="sm" variant="ghost" className="h-6 w-6 p-0 text-destructive hover:text-destructive" onClick={() => handleDeleteAdStart(aa)}>
+                      <Trash2 className="w-3 h-3" />
+                    </Button>
                   </div>
                 </div>
               ))}
@@ -209,31 +280,74 @@ export function MetaSettingsTab({ metaAccounts, adAccounts, onRefresh }: Props) 
                   <Link2 className="w-3 h-3 mr-1" /> Reconnect
                 </Button>
               )}
+              <Button size="sm" variant="outline" className="text-xs h-7 text-destructive border-destructive/30 hover:bg-destructive/10" onClick={() => handleDeleteMetaStart(ma)}>
+                <Trash2 className="w-3 h-3 mr-1" /> Delete
+              </Button>
             </div>
           </CardContent>
         </Card>
       ))}
 
-      {/* Connect Dialog */}
-      <Dialog open={showConnect} onOpenChange={setShowConnect}>
+      {/* ── Connect Dialog (guided flow) ── */}
+      <Dialog open={showConnect} onOpenChange={(o) => { if (!o) resetConnectDialog(); else setShowConnect(true); }}>
         <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>Connect Meta Account</DialogTitle>
-            <DialogDescription>Enter your Meta Business user ID and a long-lived access token.</DialogDescription>
+            <DialogDescription>
+              {connectStep === "token" && "Paste a long-lived Meta access token to connect."}
+              {connectStep === "validating" && "Validating your token..."}
+              {connectStep === "confirmed" && "Token verified! Ready to connect."}
+            </DialogDescription>
           </DialogHeader>
-          <div className="space-y-3">
-            <div><Label className="text-xs">Meta User ID</Label><Input value={connectForm.meta_user_id} onChange={e => setConnectForm(f => ({ ...f, meta_user_id: e.target.value }))} placeholder="123456789" /></div>
-            <div><Label className="text-xs">Display Name</Label><Input value={connectForm.meta_user_name} onChange={e => setConnectForm(f => ({ ...f, meta_user_name: e.target.value }))} placeholder="My Business" /></div>
-            <div><Label className="text-xs">Access Token</Label><Input type="password" value={connectForm.access_token} onChange={e => setConnectForm(f => ({ ...f, access_token: e.target.value }))} placeholder="EAABs..." /></div>
-          </div>
+
+          {connectStep === "token" && (
+            <div className="space-y-4">
+              <div className="rounded-lg border border-border/50 bg-muted/20 p-3 text-xs space-y-2">
+                <p className="font-medium">How to get a token:</p>
+                <ol className="list-decimal list-inside space-y-1 text-muted-foreground">
+                  <li>Go to <a href="https://developers.facebook.com/tools/explorer/" target="_blank" rel="noopener noreferrer" className="text-primary underline inline-flex items-center gap-0.5">Graph API Explorer <ExternalLink className="w-3 h-3" /></a></li>
+                  <li>Select your app and request <code className="bg-muted px-1 rounded">ads_read</code> + <code className="bg-muted px-1 rounded">ads_management</code> permissions</li>
+                  <li>Generate a <strong>long-lived</strong> access token and paste below</li>
+                </ol>
+              </div>
+              <div>
+                <Label className="text-xs">Access Token</Label>
+                <Input type="password" value={connectToken} onChange={e => setConnectToken(e.target.value)} placeholder="EAABs..." />
+              </div>
+            </div>
+          )}
+
+          {connectStep === "validating" && (
+            <div className="flex items-center justify-center py-8 gap-2 text-sm text-muted-foreground">
+              <Loader2 className="w-5 h-5 animate-spin" /> Validating token with Meta...
+            </div>
+          )}
+
+          {connectStep === "confirmed" && validatedUser && (
+            <div className="space-y-3">
+              <div className="flex items-center gap-3 rounded-lg border border-primary/30 bg-primary/5 p-4">
+                <CheckCircle2 className="w-8 h-8 text-primary shrink-0" />
+                <div>
+                  <p className="font-medium text-sm">{validatedUser.name}</p>
+                  <p className="text-xs text-muted-foreground">Meta User ID: {validatedUser.id}</p>
+                </div>
+              </div>
+            </div>
+          )}
+
           <DialogFooter>
-            <Button variant="outline" onClick={() => setShowConnect(false)}>Cancel</Button>
-            <Button onClick={handleConnect} disabled={!connectForm.meta_user_id || !connectForm.access_token}>Connect</Button>
+            <Button variant="outline" onClick={resetConnectDialog}>Cancel</Button>
+            {connectStep === "token" && (
+              <Button onClick={handleValidateToken} disabled={!connectToken.trim()}>Validate Token</Button>
+            )}
+            {connectStep === "confirmed" && (
+              <Button onClick={handleConnectConfirm}>Connect Account</Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      {/* Discovered Ad Accounts Dialog */}
+      {/* ── Discovered Ad Accounts Dialog ── */}
       <Dialog open={showDiscovered} onOpenChange={setShowDiscovered}>
         <DialogContent className="max-w-md">
           <DialogHeader>
@@ -266,7 +380,7 @@ export function MetaSettingsTab({ metaAccounts, adAccounts, onRefresh }: Props) 
         </DialogContent>
       </Dialog>
 
-      {/* Add Ad Account Manually Dialog */}
+      {/* ── Add Ad Account Manually Dialog ── */}
       <Dialog open={showAddAd} onOpenChange={setShowAddAd}>
         <DialogContent className="max-w-md">
           <DialogHeader>
@@ -287,7 +401,8 @@ export function MetaSettingsTab({ metaAccounts, adAccounts, onRefresh }: Props) 
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      {/* Reconnect Dialog */}
+
+      {/* ── Reconnect Dialog ── */}
       <Dialog open={showReconnect} onOpenChange={setShowReconnect}>
         <DialogContent className="max-w-md">
           <DialogHeader>
@@ -300,6 +415,48 @@ export function MetaSettingsTab({ metaAccounts, adAccounts, onRefresh }: Props) 
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowReconnect(false)}>Cancel</Button>
             <Button onClick={handleReconnectSubmit}>Reconnect</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Delete Meta Account (double confirm) ── */}
+      <Dialog open={showDeleteMeta} onOpenChange={setShowDeleteMeta}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-destructive">Permanently Delete Account</DialogTitle>
+            <DialogDescription>
+              This will permanently delete the Meta account <strong>{deleteMetaName}</strong> and all {adAccounts.filter(a => a.meta_account_id === deleteMetaTarget?.id).length} linked ad account(s). This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div>
+              <Label className="text-xs">Type <strong>{deleteMetaName}</strong> to confirm</Label>
+              <Input value={deleteConfirmText} onChange={e => setDeleteConfirmText(e.target.value)} placeholder={deleteMetaName} />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowDeleteMeta(false)}>Cancel</Button>
+            <Button variant="destructive" onClick={handleDeleteMetaConfirm} disabled={deleteConfirmText !== deleteMetaName}>
+              <Trash2 className="w-4 h-4 mr-1" /> Permanently Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Delete Ad Account (simple confirm) ── */}
+      <Dialog open={showDeleteAd} onOpenChange={setShowDeleteAd}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-destructive">Remove Ad Account</DialogTitle>
+            <DialogDescription>
+              Remove <strong>{deleteAdTarget?.ad_account_name || deleteAdTarget?.ad_account_id}</strong> from your workspace? This won't affect the account on Meta.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowDeleteAd(false)}>Cancel</Button>
+            <Button variant="destructive" onClick={handleDeleteAdConfirm}>
+              <Trash2 className="w-4 h-4 mr-1" /> Remove
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

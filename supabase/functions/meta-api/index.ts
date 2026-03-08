@@ -35,7 +35,20 @@ serve(async (req) => {
   try {
     const { action, meta_account_id, params } = await req.json();
 
-    // Fetch access token server-side
+    // ── validate_token: no stored account needed ──
+    if (action === "validate_token") {
+      const rawToken = params?.access_token;
+      if (!rawToken) return jsonResp({ error: "access_token required" }, 400);
+      const url = `${META_API_BASE}/me?fields=id,name&access_token=${rawToken}`;
+      const resp = await fetch(url);
+      const data = await resp.json();
+      if (!resp.ok || data.error) {
+        return jsonResp({ error: data.error?.message || "Invalid token" }, 400);
+      }
+      return jsonResp({ id: data.id, name: data.name });
+    }
+
+    // All other actions need a stored account
     const { data: metaAccount, error: maErr } = await adminClient
       .from("connected_meta_accounts")
       .select("access_token_encrypted, meta_user_id, status")
@@ -129,7 +142,6 @@ serve(async (req) => {
   } catch (error: any) {
     console.error("Meta API proxy error:", error);
 
-    // Log to error table
     try {
       const body = await req.clone().json().catch(() => ({}));
       await adminClient.from("meta_api_error_logs").insert({
