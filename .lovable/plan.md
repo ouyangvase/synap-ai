@@ -1,49 +1,90 @@
 
 
-## Problem Analysis
+## Plan: Complete Meta Ads Hub with Real Meta API Integration
 
-After reviewing the conversation history, logs, and code, there are **three root issues**:
+### Current State
+The Meta Ads Hub has all 8 UI tabs built with local database CRUD. However, **nothing actually calls the Meta Marketing API**. All operations (create campaign, edit ad set, etc.) only save to the local database. The `meta-api` edge function exists as a proxy but no frontend code invokes it.
 
-### 1. Screenshots appear "half image" — Viewport is 800x600
-The `fullPage: true` fix was applied but that only captures the full scroll height. The real issue is **Browserless defaults to an 800x600 pixel viewport**, making websites render in a narrow cramped view that looks like "half an image." The fix is to set the viewport to 1280x800 at the start of the composite script.
+### What Needs to Be Done
 
-### 2. Browser service returns 401 on health check — Agent can't execute
-The edge function logs show `[browser_do] Health check failed: 401`. The health check calls `/json/version?token=XXX` but Browserless may require the token as a header instead. This causes the agent to get a 503 error and give up immediately.
+**1. Create a `useMetaApi` hook** — central helper that calls the `meta-api` edge function, retrieves the stored access token from `connected_meta_accounts`, and handles errors/logging.
 
-### 3. Agent stops after errors instead of self-correcting
-The LLM model is `google/gemini-2.5-flash` which is optimized for speed, not complex multi-step reasoning. Combined with the 503 errors, the agent never gets a chance to actually execute. When it does work, it needs a stronger model for autonomous task completion.
+**2. Add "Sync from Meta" to each tab** — Campaigns, Ad Sets, Ads tabs get a "Sync" button that pulls real data from Meta API via the edge function, then upserts into the local DB (matching on `meta_campaign_id`, `meta_adset_id`, `meta_ad_id`).
 
-## Plan
+**3. Add "Push to Meta" on create/edit** — When creating or editing a campaign/adset/ad, the save action first calls the Meta API (create or update), then stores the returned Meta ID in the local DB. Local-only drafts remain supported (prefix `local_`).
 
-### A. Set viewport to 1280x800 in composite script
-In `supabase/functions/browser-proxy/index.ts`, add `page.setViewport({ width: 1280, height: 800 })` at the start of the `buildCompositeScript` function (right after `export default async function ({ page })`). This makes screenshots show the full desktop-width page.
+**4. Auto-discover Ad Accounts in Settings** — After connecting a Meta account, add a "Fetch Ad Accounts" button that calls `get_ad_accounts` via the edge function, letting users pick which ones to link instead of manually entering IDs.
 
-### B. Fix health check 401 error
-Update the health check in the `/agent-action` handler to use the correct Browserless endpoint. Instead of `/json/version?token=XXX`, try `/pressure?token=XXX` (Browserless v2 health endpoint). Add a fallback so if one fails, it tries the other. Also pass the token as a header if the query param approach fails.
+**5. Build `meta-sync` edge function** — A dedicated edge function that syncs campaigns, ad sets, ads, and daily insights for all active ad accounts. Logs results to `meta_sync_logs`. Can be triggered manually or via cron.
 
-### C. Upgrade agent model for better reasoning
-Update the `agents` table to use `google/gemini-2.5-pro` instead of `google/gemini-2.5-flash`. The Pro model is significantly better at multi-step reasoning, tool calling, and autonomous task completion — exactly what's needed for the browser automation workflow.
+**6. Build `meta-automation-eval` edge function** — Evaluates active automation rules against the latest `ad_insights_daily` data, creates alerts in `meta_automation_alerts`, and optionally executes actions (pause via Meta API).
 
-### D. Fix tool_id lookup for session continuity
-The `currentUrl` resolution in `/agent-action` uses hardcoded UUIDs (`00000000-0000-0000-0001-*`) that don't match the actual `browser_do` tool ID (`00000000-0000-0000-0000-000000000020`). Fix this to include the correct ID so the agent can resume from the last URL.
+**7. Add error logging** — Update `meta-api` edge function to log failed requests to `meta_api_error_logs` table using the service role client.
+
+**8. Secure token retrieval** — The `meta-api` edge function should accept a `meta_account_id` instead of raw `access_token` from the frontend, and fetch the token server-side from `connected_meta_accounts` using the service role. This keeps tokens out of the browser.
+
+### Files to Create/Modify
+
+| File | Action |
+|------|--------|
+| `src/hooks/useMetaApi.ts` | **Create** — Hook wrapping `supabase.functions.invoke("meta-api", ...)` |
+| `src/components/meta-ads/MetaCampaignsTab.tsx` | **Edit** — Add Sync button, push-to-Meta on save |
+| `src/components/meta-ads/MetaAdSetsTab.tsx` | **Edit** — Add Sync button, push-to-Meta on save |
+| `src/components/meta-ads/MetaAdsTab.tsx` | **Edit** — Add Sync button, push-to-Meta on save |
+| `src/components/meta-ads/MetaSettingsTab.tsx` | **Edit** — Add "Fetch Ad Accounts" auto-discovery |
+| `src/components/meta-ads/MetaOverviewTab.tsx` | **Edit** — Add manual sync trigger |
+| `supabase/functions/meta-api/index.ts` | **Edit** — Fetch token server-side, log errors to DB |
+| `supabase/functions/meta-sync/index.ts` | **Create** — Full sync: campaigns + adsets + ads + insights |
+| `supabase/functions/meta-automation-eval/index.ts` | **Create** — Rule evaluation engine |
+| `supabase/config.toml` | **Edit** — Register new edge functions |
 
 ### Technical Details
 
-**Viewport fix** (browser-proxy/index.ts line ~2976):
-```javascript
-export default async function ({ page }) {
-  await page.setViewport({ width: 1280, height: 800 });
-  // ... rest of script
+**Token Security Flow:**
+```text
+Frontend → meta-api edge function (sends meta_account_id)
+  → Edge function uses service role to SELECT access_token_encrypted FROM connected_meta_accounts
+  → Edge function calls Meta Graph API with the token
+  → Returns data to frontend (token never exposed)
 ```
 
-**Health check fix** (browser-proxy/index.ts lines ~780-807):
-Replace `/json/version` with `/pressure` and add token-as-header fallback.
+**Sync Flow:**
+```text
+meta-sync edge function:
+  1. SELECT all active connected_meta_accounts + their ad accounts
+  2. For each ad account:
+     a. GET /campaigns → upsert into meta_campaigns
+     b. GET /adsets → upsert into meta_adsets  
+     c. GET /ads → upsert into meta_ads
+     d. GET /insights (last 7d) → upsert into ad_insights_daily
+  3. Log sync results to meta_sync_logs
+```
 
-**Model upgrade** (database):
+**Automation Eval Flow:**
+```text
+meta-automation-eval edge function:
+  1. SELECT active rules from meta_automation_rules
+  2. For each rule, query ad_insights_daily (last 24h aggregate)
+  3. Evaluate condition (metric operator threshold)
+  4. If triggered → INSERT alert into meta_automation_alerts
+  5. If action_type is pause_* → call meta-api to pause the object
+```
+
+**Push-to-Meta on Save (Campaigns example):**
+- If creating new: call `create_campaign` via edge function → get back Meta campaign ID → save to DB with real `meta_campaign_id`
+- If editing existing with real Meta ID: call `update_campaign` → update local DB
+- If Meta API fails: save locally, show error toast, log to error table
+
+### Database Migration
+One migration needed to add a unique constraint for upsert support:
 ```sql
-UPDATE agents SET model = 'google/gemini-2.5-pro' WHERE is_active = true;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_meta_campaigns_account_meta_id 
+  ON meta_campaigns(ad_account_id, meta_campaign_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_meta_adsets_account_meta_id 
+  ON meta_adsets(ad_account_id, meta_adset_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_meta_ads_account_meta_id 
+  ON meta_ads(ad_account_id, meta_ad_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_insights_daily_unique 
+  ON ad_insights_daily(ad_account_id, campaign_id, date_start, date_stop);
 ```
-
-**Tool ID fix** (browser-proxy/index.ts line ~741):
-Add `"00000000-0000-0000-0000-000000000020"` to the `tool_id` filter list.
 
