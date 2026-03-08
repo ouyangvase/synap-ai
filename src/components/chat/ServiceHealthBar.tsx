@@ -86,6 +86,8 @@ export function ServiceHealthBar() {
 
   const allOnline = services.every((s) => s.status === "online");
   const anyOffline = services.some((s) => s.status === "offline");
+  const anyDegraded = services.some((s) => s.status === "degraded");
+  const anyChecking = services.some((s) => s.status === "checking");
 
   return (
     <TooltipProvider>
@@ -100,7 +102,7 @@ export function ServiceHealthBar() {
                 ))}
               </div>
               <span className={`text-[10px] ${anyOffline ? "text-destructive" : "text-muted-foreground"}`}>
-                {allOnline ? "All systems go" : anyOffline ? "Service issue" : "Checking…"}
+                {allOnline ? "All systems go" : anyOffline ? "Service issue" : anyDegraded ? "Degraded" : anyChecking ? "Checking…" : "All systems go"}
               </span>
             </div>
           </TooltipTrigger>
