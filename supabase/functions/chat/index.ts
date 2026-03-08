@@ -718,9 +718,16 @@ async function executeToolRun(
       }
     }
 
-    const failureMsg = isBrowserDo && !lastError.includes("Auth error") && !lastError.includes("Bad request")
+    let failureMsg = isBrowserDo && !lastError.includes("Auth error") && !lastError.includes("Bad request")
       ? `${lastError}. Keep steps small (1-4), use supported actions, and continue from last successful state.`
       : lastError;
+
+    // Inject fallback hints for 503/timeout errors so the LLM knows to try alternatives
+    if (lastError.includes("503") || lastError.includes("timed out") || lastError.includes("Connection refused")) {
+      failureMsg += "\n\nFALLBACK HINT: This service is temporarily unavailable. " +
+        "Use the search_web tool instead to find the information, or try a completely different approach. " +
+        "Do NOT retry the same failing tool — switch to an alternative immediately.";
+    }
 
     await supabase.from("tool_runs").update({
       status: "failed", error: failureMsg, completed_at: new Date().toISOString(),

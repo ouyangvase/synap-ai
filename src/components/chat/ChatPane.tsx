@@ -7,6 +7,7 @@ import {
   Send, Bot, Plus, Monitor, X, Image as ImageIcon, Globe,
   Hand, Play, Loader2, RefreshCw, Brain, ListChecks, Check, Pause, Square
 } from "lucide-react";
+import { ServiceHealthBar } from "./ServiceHealthBar";
 import { ToolCard } from "./ToolCard";
 import { MessageBubble } from "./MessageBubble";
 import { ThinkingPanel, ThinkingStep } from "./ThinkingPanel";
@@ -374,7 +375,10 @@ export function ChatPane({ conversationId, onNewChat }: Props) {
   return (
     <div className="flex-1 flex min-w-0">
       <div className={`flex flex-col min-w-0 ${screenshotPanelOpen && latestScreenshot ? "w-1/2" : "flex-1"}`}>
-        {/* Browser state indicator */}
+        {/* Service health indicator */}
+        <div className="border-b border-border/30">
+          <ServiceHealthBar />
+        </div>
         {browserUrl && (
           <div className="px-4 py-1.5 border-b border-border glass-subtle flex items-center gap-2">
             <div className={`w-2 h-2 rounded-full ${hasRunningBrowserTool ? "bg-amber-500" : "bg-emerald-500"} animate-pulse`} />

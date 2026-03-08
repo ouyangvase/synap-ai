@@ -1,72 +1,49 @@
 
 
-## Plan: Harden Agent Reliability — Fallback-First + Service Visibility
+## Problem Analysis
 
-### Root Causes of the Failures in Screenshot
+After reviewing the conversation history, logs, and code, there are **three root issues**:
 
-1. **`echo` tool endpoint → `localhost:5678`**: Points to local n8n which doesn't exist in production. Every echo call fails with "Connection refused".
-2. **`fetch_json` tool endpoint → `localhost:5678`**: Same problem.
-3. **`browser_do` fails 503**: When Browserless is down, agent says "I'm completely blocked" instead of using alternative tools.
-4. **No `search_web` tool linked to agent**: The `search-web` edge function exists but is NOT registered as a tool the agent can use.
-5. **System prompt lacks fallback instructions**: Agent doesn't know it should try web search when browser fails.
-6. **No health visibility**: User has no idea which services are up or down.
+### 1. Screenshots appear "half image" — Viewport is 800x600
+The `fullPage: true` fix was applied but that only captures the full scroll height. The real issue is **Browserless defaults to an 800x600 pixel viewport**, making websites render in a narrow cramped view that looks like "half an image." The fix is to set the viewport to 1280x800 at the start of the composite script.
 
-### Fixes
+### 2. Browser service returns 401 on health check — Agent can't execute
+The edge function logs show `[browser_do] Health check failed: 401`. The health check calls `/json/version?token=XXX` but Browserless may require the token as a header instead. This causes the agent to get a 503 error and give up immediately.
 
-**1. Register `search_web` tool + fix broken endpoints (DB)**
+### 3. Agent stops after errors instead of self-correcting
+The LLM model is `google/gemini-2.5-flash` which is optimized for speed, not complex multi-step reasoning. Combined with the 503 errors, the agent never gets a chance to actually execute. When it does work, it needs a stronger model for autonomous task completion.
 
-- Insert `search_web` tool into `tools` table
-- Insert `tool_endpoints` for search_web → `{SUPABASE_URL}/functions/v1/search-web`
-- Link to MuleRun Agent via `agent_tools`
-- Update `echo` endpoint from `localhost:5678` to `{SUPABASE_URL}/functions/v1/chat` (or disable it)
-- Update `fetch_json` endpoint similarly or deactivate the tool
+## Plan
 
-**2. Update system prompt with fallback strategy**
+### A. Set viewport to 1280x800 in composite script
+In `supabase/functions/browser-proxy/index.ts`, add `page.setViewport({ width: 1280, height: 800 })` at the start of the `buildCompositeScript` function (right after `export default async function ({ page })`). This makes screenshots show the full desktop-width page.
 
-Update the MuleRun Agent's `system_prompt` in DB to include:
+### B. Fix health check 401 error
+Update the health check in the `/agent-action` handler to use the correct Browserless endpoint. Instead of `/json/version?token=XXX`, try `/pressure?token=XXX` (Browserless v2 health endpoint). Add a fallback so if one fails, it tries the other. Also pass the token as a header if the query param approach fails.
 
-```text
-## FALLBACK STRATEGY (CRITICAL)
-- If browser_do returns 503/unavailable: DO NOT give up. Use search_web to find the answer instead.
-- If a tool fails 3 times: switch to an alternative tool or explain what you need from the user.
-- NEVER say "I am blocked" or "I cannot do anything". Always offer an alternative path.
-- Available fallback chain: browser_do → search_web → explain how user can do it manually.
+### C. Upgrade agent model for better reasoning
+Update the `agents` table to use `google/gemini-2.5-pro` instead of `google/gemini-2.5-flash`. The Pro model is significantly better at multi-step reasoning, tool calling, and autonomous task completion — exactly what's needed for the browser automation workflow.
+
+### D. Fix tool_id lookup for session continuity
+The `currentUrl` resolution in `/agent-action` uses hardcoded UUIDs (`00000000-0000-0000-0001-*`) that don't match the actual `browser_do` tool ID (`00000000-0000-0000-0000-000000000020`). Fix this to include the correct ID so the agent can resume from the last URL.
+
+### Technical Details
+
+**Viewport fix** (browser-proxy/index.ts line ~2976):
+```javascript
+export default async function ({ page }) {
+  await page.setViewport({ width: 1280, height: 800 });
+  // ... rest of script
 ```
 
-**3. Harden `executeToolRun` in chat/index.ts**
+**Health check fix** (browser-proxy/index.ts lines ~780-807):
+Replace `/json/version` with `/pressure` and add token-as-header fallback.
 
-When a tool returns 503, inject a richer error message into the tool result that tells the LLM about available fallback tools:
-
-```typescript
-// In the error message back to LLM:
-if (resp.status === 503) {
-  failureMsg += "\n\nFALLBACK: This service is temporarily down. Use search_web tool instead to find the information, or try a different approach.";
-}
+**Model upgrade** (database):
+```sql
+UPDATE agents SET model = 'google/gemini-2.5-pro' WHERE is_active = true;
 ```
 
-**4. Create simple internal echo function**
-
-Create `supabase/functions/echo/index.ts` — a simple echo endpoint so the echo tool works without n8n. Update the endpoint URL.
-
-**5. Add service health badges to ChatPane UI**
-
-Add a small status bar in ChatPane showing colored dots for key services:
-- Browser (check `/browser-proxy/health`)
-- AI (always on via Lovable gateway)
-- Tools (check if tool_endpoints resolve)
-
-Shown as compact icons in the chat header area.
-
-### Files to Create/Modify
-
-| File | Change |
-|------|--------|
-| `supabase/functions/echo/index.ts` | **Create** — simple echo endpoint |
-| `supabase/functions/chat/index.ts` | Add fallback hints in 503 error messages |
-| `src/components/chat/ChatPane.tsx` | Add service health indicator badges |
-| DB: `tools` | Insert `search_web` tool |
-| DB: `tool_endpoints` | Insert search_web endpoint, update echo/fetch_json endpoints |
-| DB: `agent_tools` | Link search_web to MuleRun Agent |
-| DB: `agents` | Update system_prompt with fallback instructions |
-| `supabase/config.toml` | Add `[functions.echo]` |
+**Tool ID fix** (browser-proxy/index.ts line ~741):
+Add `"00000000-0000-0000-0000-000000000020"` to the `tool_id` filter list.
 
