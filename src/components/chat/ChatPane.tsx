@@ -7,6 +7,7 @@ import {
   Send, Bot, Plus, Monitor, X, Image as ImageIcon, Globe,
   Hand, Play, Loader2, RefreshCw, Brain, ListChecks, Check, Pause, Square
 } from "lucide-react";
+import { ServiceHealthBar } from "./ServiceHealthBar";
 import { ToolCard } from "./ToolCard";
 import { MessageBubble } from "./MessageBubble";
 import { ThinkingPanel, ThinkingStep } from "./ThinkingPanel";
