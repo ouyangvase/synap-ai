@@ -29,3 +29,9 @@ verify_jwt = false
 
 [functions.meta-api]
 verify_jwt = false
+
+[functions.meta-sync]
+verify_jwt = false
+
+[functions.meta-automation-eval]
+verify_jwt = false

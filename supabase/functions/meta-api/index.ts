@@ -1,8 +1,9 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
 const META_API_BASE = "https://graph.facebook.com/v21.0";
@@ -12,38 +13,57 @@ serve(async (req) => {
     return new Response(null, { headers: corsHeaders });
   }
 
+  const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  const adminClient = createClient(supabaseUrl, serviceRoleKey);
+
+  // Validate user
+  const authHeader = req.headers.get("Authorization");
+  if (!authHeader?.startsWith("Bearer ")) {
+    return jsonResp({ error: "Unauthorized" }, 401);
+  }
+  const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
+  const userClient = createClient(supabaseUrl, anonKey, {
+    global: { headers: { Authorization: authHeader } },
+  });
+  const { data: claims, error: claimsErr } = await userClient.auth.getClaims(
+    authHeader.replace("Bearer ", "")
+  );
+  if (claimsErr || !claims?.claims) {
+    return jsonResp({ error: "Unauthorized" }, 401);
+  }
+  const userId = claims.claims.sub as string;
+
   try {
-    const authHeader = req.headers.get("Authorization");
-    if (!authHeader) {
-      return new Response(JSON.stringify({ error: "Missing authorization" }), {
-        status: 401,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+    const { action, meta_account_id, params } = await req.json();
+
+    // Fetch access token server-side
+    const { data: metaAccount, error: maErr } = await adminClient
+      .from("connected_meta_accounts")
+      .select("access_token_encrypted, meta_user_id, status")
+      .eq("id", meta_account_id)
+      .eq("user_id", userId)
+      .single();
+
+    if (maErr || !metaAccount) {
+      return jsonResp({ error: "Meta account not found or access denied" }, 404);
+    }
+    if (metaAccount.status !== "active") {
+      return jsonResp({ error: "Meta account is disconnected" }, 400);
     }
 
-    const { action, access_token, params } = await req.json();
-
-    if (!access_token) {
-      return new Response(JSON.stringify({ error: "Missing access_token" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
+    const access_token = metaAccount.access_token_encrypted;
     let result: any;
 
     switch (action) {
-      // Account discovery
       case "get_ad_accounts": {
-        const userId = params?.user_id || "me";
-        const url = `${META_API_BASE}/${userId}/adaccounts?fields=id,name,currency,timezone_name,account_status&access_token=${access_token}`;
+        const uid = params?.user_id || metaAccount.meta_user_id || "me";
+        const url = `${META_API_BASE}/${uid}/adaccounts?fields=id,name,currency,timezone_name,account_status&access_token=${access_token}`;
         result = await metaFetch(url);
         break;
       }
-
-      // Campaigns
       case "get_campaigns": {
-        const url = `${META_API_BASE}/${params.ad_account_id}/campaigns?fields=id,name,objective,status,effective_status,daily_budget,lifetime_budget,buying_type,special_ad_categories,start_time,stop_time,created_time,updated_time&limit=100&access_token=${access_token}`;
+        const url = `${META_API_BASE}/${params.ad_account_id}/campaigns?fields=id,name,objective,status,effective_status,daily_budget,lifetime_budget,buying_type,special_ad_categories,start_time,stop_time,created_time,updated_time&limit=500&access_token=${access_token}`;
         result = await metaFetch(url);
         break;
       }
@@ -57,10 +77,8 @@ serve(async (req) => {
         result = await metaFetch(url, "POST", params.data);
         break;
       }
-
-      // Ad Sets
       case "get_adsets": {
-        const url = `${META_API_BASE}/${params.ad_account_id}/adsets?fields=id,name,status,effective_status,optimization_goal,bid_strategy,daily_budget,lifetime_budget,start_time,end_time,targeting,campaign_id&limit=100&access_token=${access_token}`;
+        const url = `${META_API_BASE}/${params.ad_account_id}/adsets?fields=id,name,status,effective_status,optimization_goal,bid_strategy,daily_budget,lifetime_budget,start_time,end_time,targeting,campaign_id&limit=500&access_token=${access_token}`;
         result = await metaFetch(url);
         break;
       }
@@ -74,10 +92,8 @@ serve(async (req) => {
         result = await metaFetch(url, "POST", params.data);
         break;
       }
-
-      // Ads
       case "get_ads": {
-        const url = `${META_API_BASE}/${params.ad_account_id}/ads?fields=id,name,status,effective_status,creative,adset_id&limit=100&access_token=${access_token}`;
+        const url = `${META_API_BASE}/${params.ad_account_id}/ads?fields=id,name,status,effective_status,creative,adset_id&limit=500&access_token=${access_token}`;
         result = await metaFetch(url);
         break;
       }
@@ -91,8 +107,6 @@ serve(async (req) => {
         result = await metaFetch(url, "POST", params.data);
         break;
       }
-
-      // Insights
       case "get_insights": {
         const level = params.level || "campaign";
         const datePreset = params.date_preset;
@@ -104,33 +118,44 @@ serve(async (req) => {
         result = await metaFetch(url);
         break;
       }
-
-      // Status changes
       case "update_status": {
         const url = `${META_API_BASE}/${params.object_id}?access_token=${access_token}`;
         result = await metaFetch(url, "POST", { status: params.status });
         break;
       }
-
       default:
-        return new Response(JSON.stringify({ error: `Unknown action: ${action}` }), {
-          status: 400,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
+        return jsonResp({ error: `Unknown action: ${action}` }, 400);
     }
 
-    return new Response(JSON.stringify(result), {
-      status: 200,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    return jsonResp(result);
   } catch (error: any) {
     console.error("Meta API proxy error:", error);
-    return new Response(JSON.stringify({ error: error.message || "Internal error" }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+
+    // Log to error table
+    try {
+      const body = await req.clone().json().catch(() => ({}));
+      await adminClient.from("meta_api_error_logs").insert({
+        user_id: userId,
+        endpoint: body?.action || "unknown",
+        method: "POST",
+        error_message: error.message || "Unknown error",
+        ad_account_id: body?.params?.ad_account_id_local || null,
+        request_body: body?.params || {},
+        response_body: {},
+        status_code: 500,
+      });
+    } catch (_) {}
+
+    return jsonResp({ error: error.message || "Internal error" }, 500);
   }
 });
+
+function jsonResp(data: any, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
 
 async function metaFetch(url: string, method = "GET", body?: any): Promise<any> {
   const opts: RequestInit = { method, headers: { "Content-Type": "application/json" } };
