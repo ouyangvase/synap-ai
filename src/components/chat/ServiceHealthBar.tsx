@@ -19,18 +19,11 @@ export function ServiceHealthBar() {
   const checkHealth = useCallback(async () => {
     const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
     const apikey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
-    const {
-      data: { session },
-    } = await supabase.auth.getSession();
 
-    const authHeaders: Record<string, string> = {
+    const baseHeaders: Record<string, string> = {
       "Content-Type": "application/json",
       apikey,
     };
-
-    if (session?.access_token) {
-      authHeaders.Authorization = `Bearer ${session.access_token}`;
-    }
 
     const results: ServiceStatus[] = [];
     results.push({ name: "ai", status: "online", label: "AI" });
