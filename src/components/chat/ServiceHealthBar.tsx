@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { Activity, WifiOff, Brain, Wrench, Globe } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { supabase } from "@/integrations/supabase/client";
+
 
 interface ServiceStatus {
   name: string;
