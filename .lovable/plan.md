@@ -1,49 +1,29 @@
 
 
-## Problem Analysis
+## Root Cause
 
-After reviewing the conversation history, logs, and code, there are **three root issues**:
+The `search-web` edge function uses a **`GEMINI_API_KEY`** that is not configured as a secret. This means the entire fallback chain is broken:
 
-### 1. Screenshots appear "half image" — Viewport is 800x600
-The `fullPage: true` fix was applied but that only captures the full scroll height. The real issue is **Browserless defaults to an 800x600 pixel viewport**, making websites render in a narrow cramped view that looks like "half an image." The fix is to set the viewport to 1280x800 at the start of the composite script.
-
-### 2. Browser service returns 401 on health check — Agent can't execute
-The edge function logs show `[browser_do] Health check failed: 401`. The health check calls `/json/version?token=XXX` but Browserless may require the token as a header instead. This causes the agent to get a 503 error and give up immediately.
-
-### 3. Agent stops after errors instead of self-correcting
-The LLM model is `google/gemini-2.5-flash` which is optimized for speed, not complex multi-step reasoning. Combined with the 503 errors, the agent never gets a chance to actually execute. When it does work, it needs a stronger model for autonomous task completion.
-
-## Plan
-
-### A. Set viewport to 1280x800 in composite script
-In `supabase/functions/browser-proxy/index.ts`, add `page.setViewport({ width: 1280, height: 800 })` at the start of the `buildCompositeScript` function (right after `export default async function ({ page })`). This makes screenshots show the full desktop-width page.
-
-### B. Fix health check 401 error
-Update the health check in the `/agent-action` handler to use the correct Browserless endpoint. Instead of `/json/version?token=XXX`, try `/pressure?token=XXX` (Browserless v2 health endpoint). Add a fallback so if one fails, it tries the other. Also pass the token as a header if the query param approach fails.
-
-### C. Upgrade agent model for better reasoning
-Update the `agents` table to use `google/gemini-2.5-pro` instead of `google/gemini-2.5-flash`. The Pro model is significantly better at multi-step reasoning, tool calling, and autonomous task completion — exactly what's needed for the browser automation workflow.
-
-### D. Fix tool_id lookup for session continuity
-The `currentUrl` resolution in `/agent-action` uses hardcoded UUIDs (`00000000-0000-0000-0001-*`) that don't match the actual `browser_do` tool ID (`00000000-0000-0000-0000-000000000020`). Fix this to include the correct ID so the agent can resume from the last URL.
-
-### Technical Details
-
-**Viewport fix** (browser-proxy/index.ts line ~2976):
-```javascript
-export default async function ({ page }) {
-  await page.setViewport({ width: 1280, height: 800 });
-  // ... rest of script
+```text
+browser_do → 503 (Browserless quota exhausted)
+search_web → 503 (GEMINI_API_KEY missing)
+Agent → "I am completely blocked"
 ```
 
-**Health check fix** (browser-proxy/index.ts lines ~780-807):
-Replace `/json/version` with `/pressure` and add token-as-header fallback.
+The project already has `LOVABLE_API_KEY` configured, which provides access to Gemini and other models through the Lovable AI Gateway.
 
-**Model upgrade** (database):
-```sql
-UPDATE agents SET model = 'google/gemini-2.5-pro' WHERE is_active = true;
-```
+## Fix
 
-**Tool ID fix** (browser-proxy/index.ts line ~741):
-Add `"00000000-0000-0000-0000-000000000020"` to the `tool_id` filter list.
+**1. Rewrite `supabase/functions/search-web/index.ts`** to use the Lovable AI Gateway (`LOVABLE_API_KEY`) instead of a direct `GEMINI_API_KEY`. This uses `google/gemini-2.5-flash` via the gateway with Google Search grounding, matching existing patterns in the `chat` function.
+
+**2. Harden `ServiceHealthBar.tsx`** to silently catch any fetch errors (including CORS or network issues) so the health bar never triggers error toasts or popups.
+
+**3. Add error boundary protection in `ChatPane.tsx`** — wrap the stream response error handler to never throw unhandled exceptions that crash the app.
+
+### Files to modify
+| File | Change |
+|------|--------|
+| `supabase/functions/search-web/index.ts` | Replace GEMINI_API_KEY with Lovable AI Gateway |
+| `src/components/chat/ServiceHealthBar.tsx` | Add outer try/catch to prevent any unhandled errors |
+| `src/components/chat/ChatPane.tsx` | Ensure stream errors never cause app crash |
 
