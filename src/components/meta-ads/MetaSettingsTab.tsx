@@ -58,6 +58,14 @@ export function MetaSettingsTab({ metaAccounts, adAccounts, onRefresh }: Props) 
       params: {},
     });
     setFetchingAccounts(false);
+
+    if (res.error?.toLowerCase().includes("disconnected")) {
+      setReconnectId(metaAccountId);
+      setReconnectToken("");
+      setShowReconnect(true);
+      return;
+    }
+
     if (res.data?.data) {
       setDiscoveredAccounts(res.data.data);
       setShowDiscovered(true);
