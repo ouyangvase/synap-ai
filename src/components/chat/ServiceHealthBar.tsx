@@ -102,7 +102,7 @@ export function ServiceHealthBar() {
                 ))}
               </div>
               <span className={`text-[10px] ${anyOffline ? "text-destructive" : "text-muted-foreground"}`}>
-                {allOnline ? "All systems go" : anyOffline ? "Service issue" : "Checking…"}
+                {allOnline ? "All systems go" : anyOffline ? "Service issue" : anyDegraded ? "Degraded" : anyChecking ? "Checking…" : "All systems go"}
               </span>
             </div>
           </TooltipTrigger>
