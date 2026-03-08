@@ -100,9 +100,26 @@ export function MetaSettingsTab({ metaAccounts, adAccounts, onRefresh }: Props) 
     toast({ title: "Account disconnected" }); onRefresh();
   };
 
-  const handleReconnect = async (id: string) => {
-    await supabase.from("connected_meta_accounts").update({ status: "active" }).eq("id", id);
-    toast({ title: "Account reconnected" }); onRefresh();
+  const [showReconnect, setShowReconnect] = useState(false);
+  const [reconnectId, setReconnectId] = useState<string | null>(null);
+  const [reconnectToken, setReconnectToken] = useState("");
+
+  const handleReconnect = (id: string) => {
+    setReconnectId(id);
+    setReconnectToken("");
+    setShowReconnect(true);
+  };
+
+  const handleReconnectSubmit = async () => {
+    if (!reconnectId) return;
+    const updates: any = { status: "active" };
+    if (reconnectToken.trim()) {
+      updates.access_token_encrypted = reconnectToken.trim();
+    }
+    await supabase.from("connected_meta_accounts").update(updates).eq("id", reconnectId);
+    toast({ title: "Account reconnected" });
+    setShowReconnect(false);
+    onRefresh();
   };
 
   const isTokenExpired = (expiresAt: string | null) => {
