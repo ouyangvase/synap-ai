@@ -1,88 +1,49 @@
 
 
-## Plan: Delete with Double Confirm, Real Facebook Setup, Chat-to-Campaign
+## Problem Analysis
 
-### 1. Delete Account with Double Confirmation
+After reviewing the conversation history, logs, and code, there are **three root issues**:
 
-**File: `src/components/meta-ads/MetaSettingsTab.tsx`**
+### 1. Screenshots appear "half image" — Viewport is 800x600
+The `fullPage: true` fix was applied but that only captures the full scroll height. The real issue is **Browserless defaults to an 800x600 pixel viewport**, making websites render in a narrow cramped view that looks like "half an image." The fix is to set the viewport to 1280x800 at the start of the composite script.
 
-- Add a "Delete" button (red, destructive) next to Disconnect/Reconnect for each Meta account
-- First click opens a confirmation dialog: "Are you sure you want to permanently delete this account and all linked ad accounts?"
-- Second confirm button in dialog requires typing the account name to confirm (similar to GitHub repo delete pattern)
-- On confirm: DELETE from `connected_ad_accounts` where `meta_account_id`, then DELETE from `connected_meta_accounts` by id
-- Also add delete button for individual linked ad accounts with a simpler confirm dialog
+### 2. Browser service returns 401 on health check — Agent can't execute
+The edge function logs show `[browser_do] Health check failed: 401`. The health check calls `/json/version?token=XXX` but Browserless may require the token as a header instead. This causes the agent to get a 503 error and give up immediately.
 
-### 2. Real Facebook Connection Setup
+### 3. Agent stops after errors instead of self-correcting
+The LLM model is `google/gemini-2.5-flash` which is optimized for speed, not complex multi-step reasoning. Combined with the 503 errors, the agent never gets a chance to actually execute. When it does work, it needs a stronger model for autonomous task completion.
 
-Currently the Connect dialog asks for manual User ID + Token. This needs a proper guided flow:
+## Plan
 
-- Replace the raw token input with a step-by-step guide inside the Connect dialog:
-  1. Link to Facebook's Graph API Explorer or Business Settings to generate a token
-  2. After pasting the token, **validate it immediately** by calling `meta-api` with `get_ad_accounts` action
-  3. Auto-populate the User ID and Display Name from the validated token response (`/me?fields=id,name`)
-- Add a new `validate_token` action to the `meta-api` edge function that calls `GET /me?fields=id,name` to verify the token and return user info
-- On successful validation: save the account as "active" and auto-fetch ad accounts
-- On failure: show clear error (expired token, invalid permissions, etc.)
+### A. Set viewport to 1280x800 in composite script
+In `supabase/functions/browser-proxy/index.ts`, add `page.setViewport({ width: 1280, height: 800 })` at the start of the `buildCompositeScript` function (right after `export default async function ({ page })`). This makes screenshots show the full desktop-width page.
 
-**File: `supabase/functions/meta-api/index.ts`**
-- Add `validate_token` action (accepts raw token in params since account doesn't exist yet) — calls `/me?fields=id,name` and returns user info
-- This is the ONLY action that accepts a raw token; all others use stored tokens
+### B. Fix health check 401 error
+Update the health check in the `/agent-action` handler to use the correct Browserless endpoint. Instead of `/json/version?token=XXX`, try `/pressure?token=XXX` (Browserless v2 health endpoint). Add a fallback so if one fails, it tries the other. Also pass the token as a header if the query param approach fails.
 
-### 3. Chat Can Create Campaigns via Meta API
+### C. Upgrade agent model for better reasoning
+Update the `agents` table to use `google/gemini-2.5-pro` instead of `google/gemini-2.5-flash`. The Pro model is significantly better at multi-step reasoning, tool calling, and autonomous task completion — exactly what's needed for the browser automation workflow.
 
-Register a new tool `meta_ads_manage` so the chat agent can interact with Meta Ads:
-
-**New edge function: `supabase/functions/meta-ads-tool/index.ts`**
-- Accepts actions: `list_accounts`, `list_campaigns`, `create_campaign`, `update_campaign`, `sync_all`
-- Uses the same server-side token retrieval pattern as `meta-api`
-- Returns structured results the LLM can understand
-
-**Database: Insert tool + endpoint + link to agent**
-- Insert into `tools` table: name=`meta_ads_manage`, description explaining what it can do
-- Insert into `tool_endpoints`: pointing to the new edge function
-- Insert into `agent_tools`: linking the tool to MuleRun Agent
-
-### Files to Create/Modify
-
-| File | Change |
-|------|--------|
-| `src/components/meta-ads/MetaSettingsTab.tsx` | Add delete with double confirm, improve connect flow with token validation |
-| `supabase/functions/meta-api/index.ts` | Add `validate_token` action |
-| `supabase/functions/meta-ads-tool/index.ts` | **Create** — Tool endpoint for chat agent to manage Meta Ads |
-| DB migration | Insert `meta_ads_manage` tool, endpoint, and agent_tools link |
+### D. Fix tool_id lookup for session continuity
+The `currentUrl` resolution in `/agent-action` uses hardcoded UUIDs (`00000000-0000-0000-0001-*`) that don't match the actual `browser_do` tool ID (`00000000-0000-0000-0000-000000000020`). Fix this to include the correct ID so the agent can resume from the last URL.
 
 ### Technical Details
 
-**Delete flow:**
-```text
-User clicks Delete → Dialog opens "Type account name to confirm"
-→ User types name → "Permanently Delete" button enables
-→ DELETE connected_ad_accounts WHERE meta_account_id = X
-→ DELETE connected_meta_accounts WHERE id = X
-→ Refresh
+**Viewport fix** (browser-proxy/index.ts line ~2976):
+```javascript
+export default async function ({ page }) {
+  await page.setViewport({ width: 1280, height: 800 });
+  // ... rest of script
 ```
 
-**Token validation flow:**
-```text
-User pastes token → Frontend calls meta-api validate_token (raw token)
-→ Edge function calls GET /me?fields=id,name with that token
-→ Returns { id: "123", name: "My Business" }
-→ Frontend auto-fills User ID + Name, saves to DB, fetches ad accounts
+**Health check fix** (browser-proxy/index.ts lines ~780-807):
+Replace `/json/version` with `/pressure` and add token-as-header fallback.
+
+**Model upgrade** (database):
+```sql
+UPDATE agents SET model = 'google/gemini-2.5-pro' WHERE is_active = true;
 ```
 
-**Chat tool schema:**
-```json
-{
-  "name": "meta_ads_manage",
-  "description": "Manage Meta (Facebook/Instagram) ad campaigns. Actions: list_accounts, list_campaigns, create_campaign, update_campaign, pause_campaign, sync_all.",
-  "input_schema": {
-    "type": "object",
-    "properties": {
-      "action": { "type": "string", "enum": ["list_accounts", "list_campaigns", "create_campaign", "update_campaign", "pause_campaign", "sync_all"] },
-      "params": { "type": "object" }
-    },
-    "required": ["action"]
-  }
-}
-```
+**Tool ID fix** (browser-proxy/index.ts line ~741):
+Add `"00000000-0000-0000-0000-000000000020"` to the `tool_id` filter list.
 
