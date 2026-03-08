@@ -112,7 +112,6 @@ export function ConversationSidebar({ activeId, onSelect, onNew, open, onClose }
         </Button>
         {[
           { icon: Monitor, label: "Browser Agent", path: "/browser" },
-          { icon: Sparkles, label: "Image Generator", path: "/images" },
           { icon: Calendar, label: "Jobs & Automation", path: "/jobs" },
           { icon: Search, label: "Verified Search", path: "/search" },
           { icon: Megaphone, label: "Meta Ads Hub", path: "/meta-ads" },

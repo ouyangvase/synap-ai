@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import {
   Wrench, Clock, CheckCircle2, XCircle, Loader2, AlertTriangle,
-  ChevronDown, ChevronUp, Play, Save, Calendar, Camera, Hand, RefreshCw, Eye
+  ChevronDown, ChevronUp, Play, Save, Calendar, Camera, Hand, RefreshCw, Eye, Download, Sparkles
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
