@@ -278,6 +278,22 @@ export function MetaSettingsTab({ metaAccounts, adAccounts, onRefresh }: Props) 
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      {/* Reconnect Dialog */}
+      <Dialog open={showReconnect} onOpenChange={setShowReconnect}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Reconnect Account</DialogTitle>
+            <DialogDescription>Optionally update the access token. Leave blank to keep existing token.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div><Label className="text-xs">New Access Token (optional)</Label><Input type="password" value={reconnectToken} onChange={e => setReconnectToken(e.target.value)} placeholder="EAABs... (leave blank to keep current)" /></div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowReconnect(false)}>Cancel</Button>
+            <Button onClick={handleReconnectSubmit}>Reconnect</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
