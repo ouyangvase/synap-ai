@@ -17,52 +17,45 @@ export function ServiceHealthBar() {
   ]);
 
   const checkHealth = useCallback(async () => {
-    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-    const apikey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
-
-    const baseHeaders: Record<string, string> = {
-      "Content-Type": "application/json",
-      apikey,
-    };
-
-    const results: ServiceStatus[] = [];
-    results.push({ name: "ai", status: "online", label: "AI" });
-
     try {
-      const resp = await fetch(`${supabaseUrl}/functions/v1/browser-proxy/health`, {
-        method: "GET",
-        headers: baseHeaders,
-        signal: AbortSignal.timeout(5000),
-      });
+      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+      const apikey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
 
-      if (resp.ok) {
-        results.push({ name: "browser", status: "online", label: "Browser" });
-      } else {
-        // 502/503 = degraded (service exists but upstream issue), not a crash
+      const baseHeaders: Record<string, string> = {
+        "Content-Type": "application/json",
+        apikey,
+      };
+
+      const results: ServiceStatus[] = [];
+      results.push({ name: "ai", status: "online", label: "AI" });
+
+      try {
+        const resp = await fetch(`${supabaseUrl}/functions/v1/browser-proxy/health`, {
+          method: "GET",
+          headers: baseHeaders,
+          signal: AbortSignal.timeout(5000),
+        });
+        results.push({ name: "browser", status: resp.ok ? "online" : "degraded", label: "Browser" });
+      } catch {
         results.push({ name: "browser", status: "degraded", label: "Browser" });
       }
+
+      try {
+        const resp = await fetch(`${supabaseUrl}/functions/v1/echo`, {
+          method: "POST",
+          headers: baseHeaders,
+          body: JSON.stringify({ input: { ping: true } }),
+          signal: AbortSignal.timeout(5000),
+        });
+        results.push({ name: "tools", status: resp.ok ? "online" : "degraded", label: "Tools" });
+      } catch {
+        results.push({ name: "tools", status: "offline", label: "Tools" });
+      }
+
+      setServices(results);
     } catch {
-      results.push({ name: "browser", status: "degraded", label: "Browser" });
+      // Silently fail — never propagate health check errors to the UI
     }
-
-    try {
-      const resp = await fetch(`${supabaseUrl}/functions/v1/echo`, {
-        method: "POST",
-        headers: baseHeaders,
-        body: JSON.stringify({ input: { ping: true } }),
-        signal: AbortSignal.timeout(5000),
-      });
-
-      results.push({
-        name: "tools",
-        status: resp.ok ? "online" : "degraded",
-        label: "Tools",
-      });
-    } catch {
-      results.push({ name: "tools", status: "offline", label: "Tools" });
-    }
-
-    setServices(results);
   }, []);
 
   useEffect(() => {

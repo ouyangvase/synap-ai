@@ -1,5 +1,3 @@
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
@@ -7,12 +5,10 @@ const corsHeaders = {
 };
 
 /**
- * search_web — Real web search via Gemini's Google Search grounding.
+ * search_web — Real web search via Lovable AI Gateway + Gemini Google Search grounding.
  *
  * Accepts: { meta: {...}, input: { query: string, num_results?: number } }
  * Returns: { markdown_content, results: [{title, url, snippet}], navigation_urls }
- *
- * Uses Gemini 2.0 Flash with googleSearch tool for grounded results.
  */
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -20,10 +16,10 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const geminiApiKey = Deno.env.get("GEMINI_API_KEY");
-    if (!geminiApiKey) {
+    const apiKey = Deno.env.get("LOVABLE_API_KEY");
+    if (!apiKey) {
       return new Response(
-        JSON.stringify({ error: "GEMINI_API_KEY not configured", markdown_content: "Search unavailable — API key missing." }),
+        JSON.stringify({ error: "LOVABLE_API_KEY not configured", markdown_content: "Search unavailable — API key missing." }),
         { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
@@ -39,120 +35,63 @@ Deno.serve(async (req) => {
       );
     }
 
-    // ── Call Gemini with Google Search grounding ──
-    // Uses the Gemini v1beta API with googleSearch tool.
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`;
-
-    const geminiBody = {
-      contents: [
-        {
-          parts: [
-            {
-              text: `Search the web for: "${query}"\n\nReturn the top ${numResults} most relevant results. For each result, provide:\n1. The exact page title\n2. The full URL (must be a real, working URL — never use example.com or placeholder URLs)\n3. A brief snippet/description\n\nFormat each result as:\nTITLE: <title>\nURL: <url>\nSNIPPET: <description>\n---`,
-            },
-          ],
-        },
-      ],
-      tools: [{ google_search: {} }],
-      generationConfig: {
-        temperature: 0.1,
-        maxOutputTokens: 4096,
-      },
-    };
-
-    const resp = await fetch(geminiUrl, {
+    // ── Call Lovable AI Gateway with google/gemini-2.5-flash ──
+    const resp = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(geminiBody),
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "google/gemini-2.5-flash",
+        messages: [
+          {
+            role: "system",
+            content: `You are a web search assistant. Search the web and return the top ${numResults} most relevant results. For each result provide the exact page title, the full real URL, and a brief snippet. Format each result as:\nTITLE: <title>\nURL: <url>\nSNIPPET: <description>\n---`,
+          },
+          {
+            role: "user",
+            content: `Search the web for: "${query}"`,
+          },
+        ],
+        tools: [{ type: "function", function: { name: "google_search", description: "Search the web", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } } }],
+        temperature: 0.1,
+        max_tokens: 4096,
+      }),
     });
 
     if (!resp.ok) {
       const errText = await resp.text();
-      console.error("Gemini search error:", errText);
+      console.error("AI Gateway search error:", resp.status, errText);
+      if (resp.status === 429) {
+        return new Response(
+          JSON.stringify({ error: "Rate limited", markdown_content: "Search rate limited — please try again shortly." }),
+          { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
+      if (resp.status === 402) {
+        return new Response(
+          JSON.stringify({ error: "Credits exhausted", markdown_content: "AI credits exhausted — please top up." }),
+          { status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
       return new Response(
-        JSON.stringify({
-          error: `Search API error (${resp.status})`,
-          markdown_content: `Search failed: ${errText.substring(0, 200)}`,
-        }),
+        JSON.stringify({ error: `Search API error (${resp.status})`, markdown_content: `Search failed: ${errText.substring(0, 200)}` }),
         { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
 
-    const geminiResp = await resp.json();
+    const aiResp = await resp.json();
+    const textContent = aiResp.choices?.[0]?.message?.content || "";
 
-    // ── Extract grounding metadata (real URLs from Google Search) ──
-    const candidates = geminiResp.candidates || [];
-    const candidate = candidates[0] || {};
-    const groundingMeta = candidate.groundingMetadata || {};
-    const searchEntryPoint = groundingMeta.searchEntryPoint || {};
-    const groundingChunks = groundingMeta.groundingChunks || [];
-    const groundingSupports = groundingMeta.groundingSupports || [];
-
-    // Extract text content from Gemini response
-    const textParts = (candidate.content?.parts || [])
-      .filter((p: any) => p.text)
-      .map((p: any) => p.text)
-      .join("\n");
-
-    // ── Build results from grounding chunks (highest quality — real Google Search URLs) ──
-    interface SearchResult {
-      title: string;
-      url: string;
-      snippet: string;
-    }
-    const results: SearchResult[] = [];
-    const seenUrls = new Set<string>();
-
-    // Method 1: Extract from groundingChunks (most reliable)
-    for (const chunk of groundingChunks) {
-      const web = chunk.web || {};
-      const url = web.uri || "";
-      const title = web.title || "";
-      if (url && !seenUrls.has(url) && !isFakeUrl(url)) {
-        seenUrls.add(url);
-        results.push({
-          title: title || extractTitleFromUrl(url),
-          url,
-          snippet: "",
-        });
-      }
-    }
-
-    // Method 2: Parse structured results from the text response
-    const parsedFromText = parseResultsFromText(textParts);
-    for (const r of parsedFromText) {
-      if (r.url && !seenUrls.has(r.url) && !isFakeUrl(r.url)) {
-        seenUrls.add(r.url);
-        // If we already have this result from grounding, enrich the snippet
-        const existing = results.find((e) => e.url === r.url);
-        if (existing) {
-          if (!existing.snippet && r.snippet) existing.snippet = r.snippet;
-          if (!existing.title && r.title) existing.title = r.title;
-        } else {
-          results.push(r);
-        }
-      }
-    }
-
-    // Enrich results with snippets from grounding supports
-    for (const support of groundingSupports) {
-      const segment = support.segment || {};
-      const text = segment.text || "";
-      const indices = support.groundingChunkIndices || [];
-      for (const idx of indices) {
-        if (results[idx] && !results[idx].snippet && text) {
-          results[idx].snippet = text.substring(0, 200);
-        }
-      }
-    }
-
-    // Limit to requested number
+    // ── Parse results from the text response ──
+    const results = parseResults(textContent);
     const finalResults = results.slice(0, numResults);
 
     // ── Build markdown response ──
     let markdown = `## Search results for "${query}"\n\n`;
     if (finalResults.length === 0) {
-      markdown += textParts || "No results found.";
+      markdown += textContent || "No results found.";
     } else {
       for (let i = 0; i < finalResults.length; i++) {
         const r = finalResults[i];
@@ -162,9 +101,8 @@ Deno.serve(async (req) => {
       }
     }
 
-    // If Gemini gave a text summary, append it
-    if (textParts && finalResults.length > 0) {
-      markdown += `\n---\n\n${textParts.substring(0, 3000)}`;
+    if (textContent && finalResults.length > 0) {
+      markdown += `\n---\n\n${textContent.substring(0, 3000)}`;
     }
 
     return new Response(
@@ -174,7 +112,6 @@ Deno.serve(async (req) => {
         navigation_urls: finalResults.map((r) => r.url),
         query,
         total_results: finalResults.length,
-        grounding_source: groundingChunks.length > 0 ? "google_search" : "gemini_text",
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
@@ -187,84 +124,49 @@ Deno.serve(async (req) => {
   }
 });
 
-// ── Helper functions ──
+// ── Helpers ──
 
-/**
- * Detect fake/placeholder URLs that should never be returned.
- */
 function isFakeUrl(url: string): boolean {
-  const fakePatterns = [
-    "example.com",
-    "example.org",
-    "example.net",
-    "placeholder",
-    "test.com",
-    "fake.com",
-    "localhost",
-    "127.0.0.1",
-    "0.0.0.0",
-  ];
+  const fakes = ["example.com", "example.org", "example.net", "placeholder", "test.com", "fake.com", "localhost", "127.0.0.1"];
   const lower = url.toLowerCase();
-  return fakePatterns.some((p) => lower.includes(p));
+  return fakes.some((p) => lower.includes(p));
 }
 
-/**
- * Extract a readable title from a URL.
- */
-function extractTitleFromUrl(url: string): string {
-  try {
-    const u = new URL(url);
-    const path = u.pathname.replace(/\//g, " ").replace(/[-_]/g, " ").trim();
-    return path || u.hostname;
-  } catch {
-    return url;
-  }
-}
-
-/**
- * Parse search results from Gemini's text response.
- * Handles formats like:
- *   TITLE: ...
- *   URL: ...
- *   SNIPPET: ...
- *   ---
- */
-function parseResultsFromText(text: string): Array<{ title: string; url: string; snippet: string }> {
+function parseResults(text: string): Array<{ title: string; url: string; snippet: string }> {
   const results: Array<{ title: string; url: string; snippet: string }> = [];
+  const seenUrls = new Set<string>();
 
   // Pattern 1: TITLE/URL/SNIPPET blocks
   const blockPattern = /TITLE:\s*(.+?)[\n\r]+URL:\s*(https?:\/\/\S+)[\n\r]+SNIPPET:\s*(.+?)(?=\n---|\nTITLE:|$)/gis;
   let match;
   while ((match = blockPattern.exec(text)) !== null) {
-    results.push({
-      title: match[1].trim(),
-      url: match[2].trim(),
-      snippet: match[3].trim(),
-    });
+    const url = match[2].trim();
+    if (!isFakeUrl(url) && !seenUrls.has(url)) {
+      seenUrls.add(url);
+      results.push({ title: match[1].trim(), url, snippet: match[3].trim() });
+    }
   }
-
   if (results.length > 0) return results;
 
   // Pattern 2: Markdown links [title](url)
   const linkPattern = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
   while ((match = linkPattern.exec(text)) !== null) {
-    results.push({
-      title: match[1].trim(),
-      url: match[2].trim(),
-      snippet: "",
-    });
+    const url = match[2].trim();
+    if (!isFakeUrl(url) && !seenUrls.has(url)) {
+      seenUrls.add(url);
+      results.push({ title: match[1].trim(), url, snippet: "" });
+    }
   }
-
   if (results.length > 0) return results;
 
   // Pattern 3: Bare URLs
   const urlPattern = /(https?:\/\/[^\s<>"']+)/g;
   while ((match = urlPattern.exec(text)) !== null) {
-    results.push({
-      title: extractTitleFromUrl(match[1]),
-      url: match[1].trim(),
-      snippet: "",
-    });
+    const url = match[1].trim();
+    if (!isFakeUrl(url) && !seenUrls.has(url)) {
+      seenUrls.add(url);
+      results.push({ title: url, url, snippet: "" });
+    }
   }
 
   return results;
