@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import {
   Wrench, Clock, CheckCircle2, XCircle, Loader2, AlertTriangle,
-  ChevronDown, ChevronUp, Play, Save, Calendar, Camera, Hand, RefreshCw, Eye
+  ChevronDown, ChevronUp, Play, Save, Calendar, Camera, Hand, RefreshCw, Eye, Download, Sparkles
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
@@ -396,6 +396,55 @@ export function ToolCard({ toolRun, conversationId, onTakeOver, onResume }: Prop
             );
           })()
         )}
+
+        {/* Generated Image Display (for generate_image tool) */}
+        {toolName === "generate_image" && isCompleted && output && (() => {
+          const imageUrl = (output as any).image_url as string | null;
+          const prompt = (output as any).prompt || (output as any).original_prompt || "";
+          const style = (output as any).style || "";
+          const aspectRatio = (output as any).aspect_ratio || "";
+          if (!imageUrl) return null;
+
+          const handleDownload = async () => {
+            try {
+              const resp = await fetch(imageUrl);
+              const blob = await resp.blob();
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement("a");
+              a.href = url;
+              a.download = `${(prompt as string).slice(0, 30).replace(/[^a-zA-Z0-9]/g, "_")}.png`;
+              document.body.appendChild(a);
+              a.click();
+              document.body.removeChild(a);
+              URL.revokeObjectURL(url);
+            } catch {}
+          };
+
+          return (
+            <div className="border-t border-border/50 px-4 py-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="w-3.5 h-3.5 text-primary" />
+                  <span className="text-xs font-medium">Generated Image</span>
+                  {style && <Badge variant="outline" className="text-[10px]">{style}</Badge>}
+                  {aspectRatio && <span className="text-[10px] text-muted-foreground">{aspectRatio}</span>}
+                </div>
+                <Button variant="ghost" size="sm" onClick={handleDownload} className="h-7 text-xs gap-1 rounded-xl">
+                  <Download className="w-3 h-3" /> Download
+                </Button>
+              </div>
+              <img
+                src={imageUrl}
+                alt={prompt as string}
+                className="w-full max-w-md rounded-xl border border-border/50 elevation-1 cursor-pointer hover:opacity-90 transition-opacity"
+                onClick={() => window.open(imageUrl, "_blank")}
+              />
+              {prompt && (
+                <p className="text-[11px] text-muted-foreground italic">"{(prompt as string).slice(0, 150)}"</p>
+              )}
+            </div>
+          );
+        })()}
 
         {expanded && (
           <div className="border-t border-border/50 px-4 py-3 space-y-3">
