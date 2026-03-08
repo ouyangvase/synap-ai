@@ -40,6 +40,7 @@ export function MetaSettingsTab({ metaAccounts, adAccounts, onRefresh }: Props) 
       meta_user_name: connectForm.meta_user_name,
       access_token_encrypted: connectForm.access_token,
       scopes: ["ads_read", "ads_management"],
+      status: "active",
     });
     if (error) { toast({ title: "Error", description: error.message, variant: "destructive" }); return; }
     toast({ title: "Meta account connected" });
@@ -57,6 +58,14 @@ export function MetaSettingsTab({ metaAccounts, adAccounts, onRefresh }: Props) 
       params: {},
     });
     setFetchingAccounts(false);
+
+    if (res.error?.toLowerCase().includes("disconnected")) {
+      setReconnectId(metaAccountId);
+      setReconnectToken("");
+      setShowReconnect(true);
+      return;
+    }
+
     if (res.data?.data) {
       setDiscoveredAccounts(res.data.data);
       setShowDiscovered(true);
