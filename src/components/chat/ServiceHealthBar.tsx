@@ -29,10 +29,9 @@ export function ServiceHealthBar() {
     results.push({ name: "ai", status: "online", label: "AI" });
 
     try {
-      const resp = await fetch(`${supabaseUrl}/functions/v1/browser-proxy`, {
-        method: "POST",
-        headers: authHeaders,
-        body: JSON.stringify({ action: "health" }),
+      const resp = await fetch(`${supabaseUrl}/functions/v1/browser-proxy/health`, {
+        method: "GET",
+        headers: baseHeaders,
         signal: AbortSignal.timeout(5000),
       });
 
