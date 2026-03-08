@@ -47,7 +47,7 @@ export function ServiceHealthBar() {
     try {
       const resp = await fetch(`${supabaseUrl}/functions/v1/echo`, {
         method: "POST",
-        headers: authHeaders,
+        headers: baseHeaders,
         body: JSON.stringify({ input: { ping: true } }),
         signal: AbortSignal.timeout(5000),
       });
