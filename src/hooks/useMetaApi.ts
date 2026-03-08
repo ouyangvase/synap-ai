@@ -22,9 +22,9 @@ export function useMetaApi() {
       if (data?.error) throw new Error(data.error);
       return { data, error: null };
     } catch (err: any) {
-      const msg = err?.message || "Meta API request failed";
-      toast({ title: "Meta API Error", description: msg, variant: "destructive" });
-      return { data: null, error: msg };
+      const msg = err?.context?.body?.error || err?.message || "Meta API request failed";
+      toast({ title: "Meta API Error", description: String(msg), variant: "destructive" });
+      return { data: null, error: String(msg) };
     } finally {
       setLoading(false);
     }

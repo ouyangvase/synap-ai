@@ -100,9 +100,26 @@ export function MetaSettingsTab({ metaAccounts, adAccounts, onRefresh }: Props) 
     toast({ title: "Account disconnected" }); onRefresh();
   };
 
-  const handleReconnect = async (id: string) => {
-    await supabase.from("connected_meta_accounts").update({ status: "active" }).eq("id", id);
-    toast({ title: "Account reconnected" }); onRefresh();
+  const [showReconnect, setShowReconnect] = useState(false);
+  const [reconnectId, setReconnectId] = useState<string | null>(null);
+  const [reconnectToken, setReconnectToken] = useState("");
+
+  const handleReconnect = (id: string) => {
+    setReconnectId(id);
+    setReconnectToken("");
+    setShowReconnect(true);
+  };
+
+  const handleReconnectSubmit = async () => {
+    if (!reconnectId) return;
+    const updates: any = { status: "active" };
+    if (reconnectToken.trim()) {
+      updates.access_token_encrypted = reconnectToken.trim();
+    }
+    await supabase.from("connected_meta_accounts").update(updates).eq("id", reconnectId);
+    toast({ title: "Account reconnected" });
+    setShowReconnect(false);
+    onRefresh();
   };
 
   const isTokenExpired = (expiresAt: string | null) => {
@@ -258,6 +275,22 @@ export function MetaSettingsTab({ metaAccounts, adAccounts, onRefresh }: Props) 
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowAddAd(false)}>Cancel</Button>
             <Button onClick={handleAddAdAccount} disabled={!adForm.ad_account_id}>Link</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      {/* Reconnect Dialog */}
+      <Dialog open={showReconnect} onOpenChange={setShowReconnect}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Reconnect Account</DialogTitle>
+            <DialogDescription>Optionally update the access token. Leave blank to keep existing token.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div><Label className="text-xs">New Access Token (optional)</Label><Input type="password" value={reconnectToken} onChange={e => setReconnectToken(e.target.value)} placeholder="EAABs... (leave blank to keep current)" /></div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowReconnect(false)}>Cancel</Button>
+            <Button onClick={handleReconnectSubmit}>Reconnect</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
