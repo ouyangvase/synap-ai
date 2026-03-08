@@ -561,7 +561,7 @@ Deno.serve(async (req) => {
             browserless_status: resp.status,
             detail: body.slice(0, 500),
           },
-          502,
+          200,
         );
       }
       const versionInfo = await resp.json();

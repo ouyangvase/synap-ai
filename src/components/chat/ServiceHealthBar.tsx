@@ -35,7 +35,9 @@ export function ServiceHealthBar() {
           headers: baseHeaders,
           signal: AbortSignal.timeout(5000),
         });
-        results.push({ name: "browser", status: resp.ok ? "online" : "degraded", label: "Browser" });
+        const payload = await resp.json().catch(() => ({} as { status?: string }));
+        const isBrowserOnline = resp.ok && (payload.status === "ok" || !payload.status);
+        results.push({ name: "browser", status: isBrowserOnline ? "online" : "degraded", label: "Browser" });
       } catch {
         results.push({ name: "browser", status: "degraded", label: "Browser" });
       }
