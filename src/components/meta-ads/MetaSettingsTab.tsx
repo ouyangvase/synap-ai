@@ -8,8 +8,9 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogD
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { useToast } from "@/hooks/use-toast";
+import { useMetaApi } from "@/hooks/useMetaApi";
 import type { MetaAccount, AdAccount } from "@/hooks/useMetaAccounts";
-import { Link2, Unlink, Plus, Shield, Clock, AlertTriangle } from "lucide-react";
+import { Link2, Unlink, Plus, Shield, Clock, AlertTriangle, Download, RefreshCw } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 
 interface Props {
@@ -21,11 +22,15 @@ interface Props {
 export function MetaSettingsTab({ metaAccounts, adAccounts, onRefresh }: Props) {
   const { user } = useAuth();
   const { toast } = useToast();
+  const metaApi = useMetaApi();
   const [showConnect, setShowConnect] = useState(false);
   const [showAddAd, setShowAddAd] = useState(false);
   const [selectedMeta, setSelectedMeta] = useState<string | null>(null);
   const [connectForm, setConnectForm] = useState({ meta_user_id: "", meta_user_name: "", access_token: "" });
   const [adForm, setAdForm] = useState({ ad_account_id: "", ad_account_name: "", currency: "USD", timezone: "UTC" });
+  const [fetchingAccounts, setFetchingAccounts] = useState(false);
+  const [discoveredAccounts, setDiscoveredAccounts] = useState<any[]>([]);
+  const [showDiscovered, setShowDiscovered] = useState(false);
 
   const handleConnect = async () => {
     if (!user) return;
@@ -40,6 +45,36 @@ export function MetaSettingsTab({ metaAccounts, adAccounts, onRefresh }: Props) 
     toast({ title: "Meta account connected" });
     setShowConnect(false);
     setConnectForm({ meta_user_id: "", meta_user_name: "", access_token: "" });
+    onRefresh();
+  };
+
+  const handleFetchAdAccounts = async (metaAccountId: string) => {
+    setFetchingAccounts(true);
+    setSelectedMeta(metaAccountId);
+    const res = await metaApi.call({
+      action: "get_ad_accounts",
+      meta_account_id: metaAccountId,
+      params: {},
+    });
+    setFetchingAccounts(false);
+    if (res.data?.data) {
+      setDiscoveredAccounts(res.data.data);
+      setShowDiscovered(true);
+    }
+  };
+
+  const handleLinkDiscovered = async (acc: any) => {
+    if (!user || !selectedMeta) return;
+    const { error } = await supabase.from("connected_ad_accounts").insert({
+      meta_account_id: selectedMeta,
+      ad_account_id: acc.id,
+      ad_account_name: acc.name || acc.id,
+      currency: acc.currency || "USD",
+      timezone: acc.timezone_name || "UTC",
+      user_id: user.id,
+    });
+    if (error) { toast({ title: "Error", description: error.message, variant: "destructive" }); return; }
+    toast({ title: `Linked ${acc.name || acc.id}` });
     onRefresh();
   };
 
@@ -62,14 +97,12 @@ export function MetaSettingsTab({ metaAccounts, adAccounts, onRefresh }: Props) 
 
   const handleDisconnect = async (id: string) => {
     await supabase.from("connected_meta_accounts").update({ status: "disconnected" }).eq("id", id);
-    toast({ title: "Account disconnected" });
-    onRefresh();
+    toast({ title: "Account disconnected" }); onRefresh();
   };
 
   const handleReconnect = async (id: string) => {
     await supabase.from("connected_meta_accounts").update({ status: "active" }).eq("id", id);
-    toast({ title: "Account reconnected" });
-    onRefresh();
+    toast({ title: "Account reconnected" }); onRefresh();
   };
 
   const isTokenExpired = (expiresAt: string | null) => {
@@ -79,7 +112,6 @@ export function MetaSettingsTab({ metaAccounts, adAccounts, onRefresh }: Props) 
 
   return (
     <div className="space-y-6 max-w-3xl">
-      {/* Connection Setup */}
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-lg font-semibold flex items-center gap-2"><Shield className="w-5 h-5" /> Connection Setup</h2>
@@ -88,7 +120,6 @@ export function MetaSettingsTab({ metaAccounts, adAccounts, onRefresh }: Props) 
         <Button size="sm" onClick={() => setShowConnect(true)}><Plus className="w-4 h-4 mr-1" /> Connect Account</Button>
       </div>
 
-      {/* Connected Accounts */}
       {metaAccounts.length === 0 ? (
         <Card>
           <CardContent className="py-10 text-center">
@@ -109,11 +140,7 @@ export function MetaSettingsTab({ metaAccounts, adAccounts, onRefresh }: Props) 
                 <Badge variant={ma.status === "active" ? "default" : "secondary"} className="text-xs">{ma.status}</Badge>
                 {ma.token_expires_at && (
                   <Badge variant={isTokenExpired(ma.token_expires_at) ? "destructive" : "outline"} className="text-xs">
-                    {isTokenExpired(ma.token_expires_at) ? (
-                      <><AlertTriangle className="w-3 h-3 mr-1" />Expired</>
-                    ) : (
-                      <><Clock className="w-3 h-3 mr-1" />Expires {formatDistanceToNow(new Date(ma.token_expires_at), { addSuffix: true })}</>
-                    )}
+                    {isTokenExpired(ma.token_expires_at) ? <><AlertTriangle className="w-3 h-3 mr-1" />Expired</> : <><Clock className="w-3 h-3 mr-1" />Expires {formatDistanceToNow(new Date(ma.token_expires_at), { addSuffix: true })}</>}
                   </Badge>
                 )}
               </div>
@@ -125,7 +152,6 @@ export function MetaSettingsTab({ metaAccounts, adAccounts, onRefresh }: Props) 
               Last synced: {ma.last_synced_at ? formatDistanceToNow(new Date(ma.last_synced_at), { addSuffix: true }) : "Never"}
             </div>
 
-            {/* Ad accounts under this meta account */}
             <div className="space-y-1.5">
               <p className="text-xs font-medium">Linked Ad Accounts</p>
               {adAccounts.filter(a => a.meta_account_id === ma.id).map(aa => (
@@ -137,9 +163,14 @@ export function MetaSettingsTab({ metaAccounts, adAccounts, onRefresh }: Props) 
                   </div>
                 </div>
               ))}
-              <Button size="sm" variant="outline" className="text-xs h-7" onClick={() => { setSelectedMeta(ma.id); setShowAddAd(true); }}>
-                <Plus className="w-3 h-3 mr-1" /> Add Ad Account
-              </Button>
+              <div className="flex gap-2">
+                <Button size="sm" variant="outline" className="text-xs h-7" onClick={() => handleFetchAdAccounts(ma.id)} disabled={fetchingAccounts}>
+                  <Download className={`w-3 h-3 mr-1 ${fetchingAccounts ? "animate-spin" : ""}`} /> Fetch from Meta
+                </Button>
+                <Button size="sm" variant="outline" className="text-xs h-7" onClick={() => { setSelectedMeta(ma.id); setShowAddAd(true); }}>
+                  <Plus className="w-3 h-3 mr-1" /> Add Manually
+                </Button>
+              </div>
             </div>
 
             <div className="flex gap-2 pt-2 border-t border-border/30">
@@ -176,7 +207,40 @@ export function MetaSettingsTab({ metaAccounts, adAccounts, onRefresh }: Props) 
         </DialogContent>
       </Dialog>
 
-      {/* Add Ad Account Dialog */}
+      {/* Discovered Ad Accounts Dialog */}
+      <Dialog open={showDiscovered} onOpenChange={setShowDiscovered}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Discovered Ad Accounts</DialogTitle>
+            <DialogDescription>Click to link an ad account to your workspace.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 max-h-[300px] overflow-y-auto">
+            {discoveredAccounts.length === 0 ? (
+              <p className="text-sm text-muted-foreground text-center py-4">No ad accounts found.</p>
+            ) : discoveredAccounts.map(acc => {
+              const alreadyLinked = adAccounts.some(a => a.ad_account_id === acc.id);
+              return (
+                <div key={acc.id} className="flex items-center justify-between py-2 px-3 rounded-lg bg-muted/30 text-xs">
+                  <div>
+                    <p className="font-medium">{acc.name || acc.id}</p>
+                    <p className="text-muted-foreground">{acc.id} • {acc.currency} • {acc.timezone_name}</p>
+                  </div>
+                  {alreadyLinked ? (
+                    <Badge variant="secondary" className="text-xs">Linked</Badge>
+                  ) : (
+                    <Button size="sm" className="text-xs h-7" onClick={() => handleLinkDiscovered(acc)}>Link</Button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowDiscovered(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Add Ad Account Manually Dialog */}
       <Dialog open={showAddAd} onOpenChange={setShowAddAd}>
         <DialogContent className="max-w-md">
           <DialogHeader>
