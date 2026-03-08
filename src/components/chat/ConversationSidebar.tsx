@@ -3,7 +3,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Plus, MessageSquare, LogOut, X, Monitor, Calendar, Trash2, Sparkles, Search, Pencil, Check, Megaphone } from "lucide-react";
+import { Plus, MessageSquare, LogOut, X, Monitor, Calendar, Trash2, Search, Pencil, Check, Megaphone } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { formatDistanceToNow } from "date-fns";
